@@ -1,0 +1,13 @@
+# Web Backend & API
+Flask==2.3.3
+gunicorn==21.2.0
+line-bot-sdk==3.5.0
+
+# Database
+SQLAlchemy==2.0.20
+mysql-connector-python==8.1.0
+
+# Utilities
+python-dotenv==1.0.0
+cryptography==41.0.3
+

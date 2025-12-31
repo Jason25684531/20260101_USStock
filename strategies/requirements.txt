@@ -1,0 +1,20 @@
+# Core Data & Backtesting
+numpy==1.23.5
+pandas==2.0.3
+numba==0.56.4
+vectorbt==0.25.5
+plotly==5.14.1
+yfinance==0.2.28
+
+# Database
+SQLAlchemy==2.0.20
+mysql-connector-python==8.1.0
+
+# Trade Execution
+alpaca-trade-api==3.0.2
+
+# Utilities
+python-dotenv==1.0.0
+
+
+

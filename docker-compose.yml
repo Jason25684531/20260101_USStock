@@ -1,0 +1,75 @@
+version: '3.8'
+
+services:
+  db:
+    image: mysql:8.0
+    container_name: usstock_db
+    environment:
+      MYSQL_ROOT_PASSWORD_FILE: /run/secrets/db_root_password
+      MYSQL_DATABASE: usstock
+      MYSQL_USER: trader
+      MYSQL_PASSWORD_FILE: /run/secrets/db_password
+    secrets:
+      - db_root_password
+      - db_password
+    volumes:
+      - db_data:/var/lib/mysql
+      - ./database/my.cnf:/etc/mysql/conf.d/my.cnf:ro
+      - ./database/init:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "3308:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  strategy_engine:
+    build:
+      context: ./strategies
+    container_name: usstock_strategy_engine
+    depends_on:
+      db:
+        condition: service_healthy
+    secrets:
+      - db_password
+      - alpaca_api_key
+      - alpaca_secret_key
+    environment:
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./strategies/src:/app/src:ro
+    command: ["python", "src/main.py"]
+
+  web_dashboard:
+    build:
+      context: ./web
+    container_name: usstock_web_dashboard
+    depends_on:
+      db:
+        condition: service_healthy
+    secrets:
+      - db_password
+      - line_channel_secret
+      - line_channel_access_token
+    volumes:
+      - ./web:/app:ro
+    ports:
+      - "5000:5000"
+
+secrets:
+  db_root_password:
+    file: ./.secrets/db_root_password
+  db_password:
+    file: ./.secrets/db_password
+  alpaca_api_key:
+    file: ./.secrets/alpaca_api_key
+  alpaca_secret_key:
+    file: ./.secrets/alpaca_secret_key
+  line_channel_secret:
+    file: ./.secrets/line_channel_secret
+  line_channel_access_token:
+    file: ./.secrets/line_channel_access_token
+
+volumes:
+  db_data:

@@ -1,0 +1,5 @@
+# Ignore unnecessary files for Docker
+.env
+.secrets/
+venv/
+__pycache__/
