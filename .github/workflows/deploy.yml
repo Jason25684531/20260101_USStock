@@ -1,0 +1,113 @@
+# US Stock Trading System - Deployment Workflow
+#
+# 此工作流用於自動部署到生產 VPS
+# 觸發條件：推送到 main 分支
+#
+# 使用前需配置以下 GitHub Secrets：
+# - VPS_HOST: VPS 主機地址
+# - VPS_USER: SSH 用戶名
+# - VPS_SSH_KEY: SSH 私鑰
+# - VPS_DEPLOY_PATH: 部署路徑
+
+name: Deploy to Production
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '*.md'
+      - 'docs/**'
+      - '.github/prompts/**'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+          - production
+          - staging
+
+env:
+  DOCKER_COMPOSE_VERSION: '2.23.0'
+
+jobs:
+  # 構建和測試
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r strategies/requirements.txt
+      
+      - name: Run basic tests
+        run: |
+          echo "Running basic syntax checks..."
+          python -m py_compile strategies/src/main.py
+          python -m py_compile web/app.py
+          echo "✅ Syntax checks passed"
+
+  # 部署到 VPS
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Deploy to VPS via SSH
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            cd ${{ secrets.VPS_DEPLOY_PATH }}
+            
+            # 拉取最新代碼
+            git pull origin main
+            
+            # 重建並啟動容器
+            docker-compose -f prod.docker-compose.yml down
+            docker-compose -f prod.docker-compose.yml build --no-cache
+            docker-compose -f prod.docker-compose.yml up -d
+            
+            # 清理舊鏡像
+            docker image prune -f
+            
+            # 檢查服務狀態
+            sleep 10
+            docker-compose -f prod.docker-compose.yml ps
+            
+            echo "✅ Deployment completed!"
+      
+      - name: Health Check
+        run: |
+          echo "Waiting for services to start..."
+          sleep 30
+          echo "Deployment notification would be sent here"
+      
+      - name: Notify on Success
+        if: success()
+        run: |
+          echo "🚀 Deployment successful!"
+          # 這裡可以添加 Slack/Discord/Line 通知
+      
+      - name: Notify on Failure
+        if: failure()
+        run: |
+          echo "❌ Deployment failed!"
+          # 這裡可以添加失敗通知

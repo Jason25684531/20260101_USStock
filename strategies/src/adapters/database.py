@@ -8,6 +8,12 @@ import pandas as pd
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
+# 使用絕對導入
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from utils.security import get_secret
+
 
 class DatabaseAdapter:
     """數據庫適配器，處理所有數據庫操作"""
@@ -17,7 +23,8 @@ class DatabaseAdapter:
         db_host = os.getenv('DB_HOST', 'localhost')
         db_port = os.getenv('DB_PORT', '3306')
         db_user = os.getenv('DB_USER', 'root')
-        db_pass = os.getenv('DB_PASSWORD', 'rootpassword')
+        # 使用 Docker Secrets 獲取密碼
+        db_pass = get_secret('db_root_password', default=os.getenv('DB_PASSWORD', 'rootpassword'))
         db_name = os.getenv('DB_NAME', 'usstock')
         
         connection_string = (
@@ -241,6 +248,70 @@ class DatabaseAdapter:
             df.set_index('timestamp', inplace=True)
         
         return df
+    
+    def save_fundamentals(self, fundamentals: dict, symbol: str, data_date: str = None) -> bool:
+        """
+        保存基本面數據到數據庫
+        
+        Args:
+            fundamentals: 基本面數據字典
+            symbol: 股票代碼
+            data_date: 數據日期，默認為今天
+            
+        Returns:
+            是否保存成功
+        """
+        if not fundamentals:
+            return False
+        
+        if data_date is None:
+            from datetime import date
+            data_date = date.today().isoformat()
+        
+        try:
+            with self.engine.begin() as conn:
+                query = text("""
+                    INSERT INTO stock_fundamentals 
+                    (symbol, data_date, pe_ratio, peg_ratio, pb_ratio, 
+                     revenue_growth_yoy, earnings_growth_yoy, 
+                     inst_ownership_pct, inst_holders_count, market_cap, forward_pe)
+                    VALUES 
+                    (:symbol, :data_date, :pe_ratio, :peg_ratio, :pb_ratio,
+                     :revenue_growth_yoy, :earnings_growth_yoy,
+                     :inst_ownership_pct, :inst_holders_count, :market_cap, :forward_pe)
+                    ON DUPLICATE KEY UPDATE
+                    pe_ratio = VALUES(pe_ratio),
+                    peg_ratio = VALUES(peg_ratio),
+                    pb_ratio = VALUES(pb_ratio),
+                    revenue_growth_yoy = VALUES(revenue_growth_yoy),
+                    earnings_growth_yoy = VALUES(earnings_growth_yoy),
+                    inst_ownership_pct = VALUES(inst_ownership_pct),
+                    inst_holders_count = VALUES(inst_holders_count),
+                    market_cap = VALUES(market_cap),
+                    forward_pe = VALUES(forward_pe),
+                    updated_at = CURRENT_TIMESTAMP
+                """)
+                
+                conn.execute(query, {
+                    'symbol': symbol,
+                    'data_date': data_date,
+                    'pe_ratio': fundamentals.get('pe_ratio'),
+                    'peg_ratio': fundamentals.get('peg_ratio'),
+                    'pb_ratio': fundamentals.get('pb_ratio'),
+                    'revenue_growth_yoy': fundamentals.get('revenue_growth_yoy'),
+                    'earnings_growth_yoy': fundamentals.get('earnings_growth_yoy'),
+                    'inst_ownership_pct': fundamentals.get('inst_ownership_pct'),
+                    'inst_holders_count': fundamentals.get('inst_holders_count'),
+                    'market_cap': fundamentals.get('market_cap'),
+                    'forward_pe': fundamentals.get('forward_pe')
+                })
+                
+            print(f"✅ {symbol}: 基本面數據已保存")
+            return True
+            
+        except Exception as e:
+            print(f"❌ {symbol}: 保存基本面數據失敗: {str(e)}")
+            return False
     
     def close(self):
         """關閉數據庫連接"""

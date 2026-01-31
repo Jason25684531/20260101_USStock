@@ -1,7 +1,9 @@
 # Web Backend & API
 Flask==2.3.3
+Flask-HTTPAuth==4.8.0
 gunicorn==21.2.0
 line-bot-sdk==3.5.0
+requests>=2.31.0
 
 # Database
 SQLAlchemy==2.0.20

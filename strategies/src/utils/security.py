@@ -23,8 +23,8 @@ def get_secret(secret_name: str, default: Optional[str] = None) -> Optional[str]
     Retrieve a secret value securely.
     
     Priority order:
-    1. Docker Secrets (/run/secrets/<secret_name>)
-    2. Environment variable (for local dev only)
+    1. Docker Secrets (/run/secrets/<secret_name>) - REQUIRED in production
+    2. Environment variable (for local dev ONLY when not in production)
     3. Default value (if provided)
     
     Args:
@@ -35,7 +35,7 @@ def get_secret(secret_name: str, default: Optional[str] = None) -> Optional[str]
         The secret value as a string, or None/default if not found.
         
     Raises:
-        ValueError: If secret is required but not found (when default is None).
+        ValueError: If in production and secret is not found in Docker Secrets.
         
     Example:
         >>> db_password = get_secret("db_password")
@@ -49,7 +49,16 @@ def get_secret(secret_name: str, default: Optional[str] = None) -> Optional[str]
         except (IOError, PermissionError) as e:
             print(f"Warning: Could not read secret file {secret_file}: {e}")
     
-    # Priority 2: Environment variable (local dev fallback)
+    # If in production (Docker Secrets path exists), do NOT fall back to env vars
+    if SECRETS_PATH.exists():
+        if default is not None:
+            return default
+        raise ValueError(
+            f"Secret '{secret_name}' not found in {SECRETS_PATH}. "
+            f"Production environment requires Docker Secrets."
+        )
+    
+    # Priority 2: Environment variable (local dev fallback ONLY)
     env_value = os.environ.get(secret_name.upper())
     if env_value is not None:
         return env_value

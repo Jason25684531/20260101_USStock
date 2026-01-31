@@ -66,23 +66,51 @@ def fetch_data(
 
 def fetch_fundamentals(symbol: str) -> dict:
     """
-    獲取基本面數據 (PE/PB 等)
+    獲取基本面數據 (PE/PB/PEG/成長率/機構持股等)
     
     Args:
         symbol: 股票代碼
         
     Returns:
-        包含基本面數據的字典
+        包含基本面數據的字典，包括：
+        - pe_ratio: 市盈率
+        - pb_ratio: 市淨率
+        - peg_ratio: PEG比率
+        - forward_pe: 預期市盈率
+        - revenue_growth_yoy: 年度營收增長率
+        - inst_ownership_pct: 機構持股百分比
+        - inst_holders_count: 機構持有者數量
+        - market_cap: 市值
     """
     try:
         ticker = yf.Ticker(symbol)
         info = ticker.info
         
+        # 獲取機構持股數據
+        inst_ownership_pct = None
+        inst_holders_count = None
+        try:
+            institutional_holders = ticker.institutional_holders
+            if institutional_holders is not None and not institutional_holders.empty:
+                # 計算前十大機構持股百分比的總和作為參考
+                inst_ownership_pct = info.get('heldPercentInstitutions', None)
+                inst_holders_count = len(institutional_holders)
+        except Exception as e:
+            print(f"   機構持股數據獲取失敗: {e}")
+        
+        # 計算營收增長率
+        revenue_growth_yoy = info.get('revenueGrowth', None)
+        
         return {
             'pe_ratio': info.get('trailingPE', None),
             'pb_ratio': info.get('priceToBook', None),
             'forward_pe': info.get('forwardPE', None),
-            'peg_ratio': info.get('pegRatio', None)
+            'peg_ratio': info.get('pegRatio', None),
+            'revenue_growth_yoy': revenue_growth_yoy,
+            'earnings_growth_yoy': info.get('earningsGrowth', None),
+            'inst_ownership_pct': inst_ownership_pct,
+            'inst_holders_count': inst_holders_count,
+            'market_cap': info.get('marketCap', None)
         }
     except Exception as e:
         print(f"⚠️  無法獲取 {symbol} 基本面數據: {e}")
@@ -95,7 +123,7 @@ def download_and_save(
     interval: str = "1d"
 ) -> dict:
     """
-    下載市場數據並保存到數據庫
+    下載市場數據和基本面數據並保存到數據庫
     
     Args:
         symbols: 股票代碼列表，默認為 ['SPY', 'QQQ', 'AAPL', 'NVDA']
@@ -124,14 +152,22 @@ def download_and_save(
             # 下載 OHLCV 數據
             df = fetch_data(symbol, period=period, interval=interval)
             
-            # 嘗試獲取基本面數據
+            # 獲取基本面數據
+            print(f"   正在獲取 {symbol} 基本面數據...")
             fundamentals = fetch_fundamentals(symbol)
+            
+            # 保存基本面數據到數據庫
+            if fundamentals:
+                from datetime import date
+                db.save_fundamentals(fundamentals, symbol, date.today().isoformat())
+            
+            # 將部分基本面數據添加到市場數據（可選）
             if fundamentals.get('pe_ratio'):
                 df['pe_ratio'] = fundamentals['pe_ratio']
             if fundamentals.get('pb_ratio'):
                 df['pb_ratio'] = fundamentals['pb_ratio']
             
-            # 保存到數據庫
+            # 保存市場數據到數據庫
             rows_saved = db.save_market_data(df, symbol)
             
             results['success'].append(symbol)

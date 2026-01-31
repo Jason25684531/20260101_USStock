@@ -1,4 +1,12 @@
-version: '3.8'
+# Production Docker Compose Configuration
+# 
+# 生產環境配置：
+# - 不暴露數據庫端口
+# - 使用 gunicorn 運行 Web
+# - 啟用調度器模式
+# - 設置重啟策略
+#
+# 使用方式: docker-compose -f prod.docker-compose.yml up -d
 
 services:
   db:
@@ -17,8 +25,9 @@ services:
       - db_data:/var/lib/mysql
       - ./database/my.cnf:/etc/mysql/conf.d/my.cnf:ro
       - ./database/init:/docker-entrypoint-initdb.d:ro
-    ports:
-      - "3308:3306"
+    # 生產環境不暴露數據庫端口
+    # ports:
+    #   - "3308:3306"
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p$$(cat /run/secrets/db_root_password)"]
       interval: 10s
@@ -55,6 +64,12 @@ services:
     command: ["python", "src/main.py"]
     networks:
       - usstock_network
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
 
   web_dashboard:
     build:
@@ -88,6 +103,14 @@ services:
       start_period: 10s
     networks:
       - usstock_network
+    # 生產環境使用 gunicorn（已在 Dockerfile 中配置）
+    command: ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "2", "--timeout", "120", "app:app"]
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 128M
 
 secrets:
   db_root_password:

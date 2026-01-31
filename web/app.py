@@ -2,19 +2,58 @@
 Flask Web Application for US Stock Trading Dashboard
 
 提供 API 端點來查詢回測結果和顯示權益曲線
+包含 Line Bot Webhook 處理
+
+Author: Quant System
+Created: 2025-12-31
+Updated: 2026-01-31 - 添加 Line Bot 整合
 """
 import os
+from pathlib import Path
+from typing import Optional
 from flask import Flask, render_template, jsonify
+from flask_httpauth import HTTPBasicAuth
+from werkzeug.security import check_password_hash, generate_password_hash
 from sqlalchemy import create_engine, text
 from datetime import datetime
 
-app = Flask(__name__)
+# 導入 Line Bot Blueprint
+from bot import line_bot_bp
 
+app = Flask(__name__)
+auth = HTTPBasicAuth()
+
+# 註冊 Line Bot Blueprint
+app.register_blueprint(line_bot_bp, url_prefix='/bot')
+
+# ============================================
+# 安全工具函數（避免重複導入問題）
+# ============================================
+SECRETS_PATH = Path("/run/secrets")
+
+
+def get_secret(secret_name: str, default: Optional[str] = None) -> Optional[str]:
+    """從 Docker Secrets 或環境變量獲取密鑰"""
+    secret_file = SECRETS_PATH / secret_name
+    if secret_file.exists():
+        try:
+            return secret_file.read_text().strip()
+        except (IOError, PermissionError):
+            pass
+    
+    if SECRETS_PATH.exists():
+        return default
+    
+    return os.environ.get(secret_name.upper(), default)
+
+
+# ============================================
 # 數據庫配置
+# ============================================
 DB_HOST = os.getenv('DB_HOST', 'localhost')
 DB_PORT = os.getenv('DB_PORT', '3306')
 DB_USER = os.getenv('DB_USER', 'root')
-DB_PASS = os.getenv('DB_PASSWORD', 'rootpassword')
+DB_PASS = get_secret('db_root_password', default=os.getenv('DB_PASSWORD', 'rootpassword'))
 DB_NAME = os.getenv('DB_NAME', 'usstock')
 
 # 建立數據庫連接
@@ -24,14 +63,33 @@ connection_string = (
 )
 engine = create_engine(connection_string, echo=False)
 
+# ============================================
+# Web 認證配置
+# ============================================
+WEB_PASSWORD = get_secret('web_password', default='admin123')
+WEB_PASSWORD_HASH = generate_password_hash(WEB_PASSWORD)
 
+
+@auth.verify_password
+def verify_password(username, password):
+    """驗證用戶名和密碼"""
+    if username == 'admin' and check_password_hash(WEB_PASSWORD_HASH, password):
+        return username
+    return None
+
+
+# ============================================
+# 頁面路由
+# ============================================
 @app.route('/')
+@auth.login_required
 def index():
     """首頁 - 顯示儀表板"""
     return render_template('index.html')
 
 
 @app.route('/api/strategies')
+@auth.login_required
 def get_strategies():
     """
     獲取所有策略運行記錄
@@ -77,6 +135,7 @@ def get_strategies():
 
 
 @app.route('/api/run/<int:run_id>/equity')
+@auth.login_required
 def get_equity_curve(run_id):
     """
     獲取指定回測運行的權益曲線
@@ -117,6 +176,7 @@ def get_equity_curve(run_id):
 
 
 @app.route('/api/run/<int:run_id>/trades')
+@auth.login_required
 def get_trades(run_id):
     """
     獲取指定回測運行的交易記錄
@@ -163,16 +223,16 @@ def get_trades(run_id):
 
 @app.route('/health')
 def health():
-    """健康檢查端點"""
+    """健康檢查端點（公開，供 Docker 使用）"""
     try:
-        # 測試數據庫連接
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
         
         return jsonify({
             'status': 'healthy',
             'timestamp': datetime.now().isoformat(),
-            'database': 'connected'
+            'database': 'connected',
+            'line_bot': 'enabled'
         })
     except Exception as e:
         return jsonify({
@@ -183,8 +243,73 @@ def health():
         }), 500
 
 
+# ============================================
+# Line Bot 通知 API（供策略引擎調用）
+# ============================================
+@app.route('/api/notify/signal', methods=['POST'])
+def notify_signal():
+    """
+    接收策略引擎的交易信號並推送到 Line
+    
+    這是一個內部 API，供策略引擎調用
+    """
+    from flask import request
+    from bot.handler import get_secret
+    import requests
+    
+    data = request.get_json()
+    if not data:
+        return jsonify({'error': 'No data provided'}), 400
+    
+    channel_token = get_secret('line_channel_token')
+    user_id = get_secret('line_user_id')
+    
+    if not channel_token or not user_id:
+        return jsonify({'error': 'Line Bot not configured'}), 503
+    
+    # 構建消息
+    action_emoji = {"BUY": "🟢", "SELL": "🔴", "HOLD": "🟡"}.get(data.get('action', '').upper(), "⚪")
+    
+    message = f"""
+{action_emoji} 交易信號 {action_emoji}
+
+📊 股票: {data.get('symbol', 'N/A')}
+📈 動作: {data.get('action', 'N/A').upper()}
+💰 價格: ${data.get('price', 0):,.2f}
+🎯 策略: {data.get('strategy', 'Unknown')}
+📝 原因: {data.get('reason', 'N/A')}
+
+⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+""".strip()
+    
+    # 推送消息
+    try:
+        response = requests.post(
+            "https://api.line.me/v2/bot/message/push",
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {channel_token}"
+            },
+            json={
+                "to": user_id,
+                "messages": [{"type": "text", "text": message}]
+            },
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            return jsonify({'status': 'sent'})
+        else:
+            return jsonify({'error': f'Line API error: {response.status_code}'}), 500
+            
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 if __name__ == '__main__':
     print(f"🚀 啟動 Flask 儀表板...")
     print(f"   數據庫: {DB_HOST}:{DB_PORT}/{DB_NAME}")
     print(f"   訪問地址: http://0.0.0.0:5000")
+    print(f"   Line Bot Webhook: /bot/callback")
+    print(f"   認證: 用戶名='admin'")
     app.run(host='0.0.0.0', port=5000, debug=True)

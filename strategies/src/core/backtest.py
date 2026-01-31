@@ -3,12 +3,14 @@ Backtesting Engine using VectorBT for the US Stock Trading System.
 
 This module implements vectorized backtesting strategies using VectorBT.
 All operations must be vectorized (no for loops for data iteration).
+Includes ATR-based trailing stop loss functionality.
 
 Author: Quant System
 Created: 2025-12-31
+Updated: 2026-01-31 - Added ATR trailing stop functionality
 """
 
-from typing import Tuple
+from typing import Tuple, Optional
 import pandas as pd
 import numpy as np
 import vectorbt as vbt
@@ -141,3 +143,163 @@ def calculate_metrics(portfolio: vbt.Portfolio) -> dict:
         "start_value": stats.get("Start Value", 0.0),
         "end_value": stats.get("End Value", 0.0)
     }
+
+
+def calculate_atr(
+    data: pd.DataFrame,
+    period: int = 14
+) -> pd.Series:
+    """
+    計算 Average True Range (ATR)
+    
+    ATR 是衡量市場波動性的指標，用於設置止損位
+    
+    Args:
+        data: 包含 High, Low, Close 的 DataFrame
+        period: ATR 計算週期（默認14天）
+        
+    Returns:
+        ATR 值的 Series
+    """
+    high = data['High']
+    low = data['Low']
+    close = data['Close']
+    
+    # 計算 True Range
+    tr1 = high - low
+    tr2 = abs(high - close.shift(1))
+    tr3 = abs(low - close.shift(1))
+    
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    
+    # 計算 ATR（True Range 的移動平均）
+    atr = tr.rolling(window=period).mean()
+    
+    return atr
+
+
+def apply_atr_stop(
+    entry_price: float,
+    current_price: float,
+    atr_value: float,
+    multiplier: float = 2.0
+) -> bool:
+    """
+    判斷是否觸發 ATR 追蹤止損
+    
+    止損邏輯：
+    - 當前價格低於（入場價格 - ATR * 倍數）時觸發止損
+    
+    Args:
+        entry_price: 入場價格
+        current_price: 當前價格
+        atr_value: ATR 值
+        multiplier: ATR 倍數（默認2.0）
+        
+    Returns:
+        是否觸發止損（True=觸發，False=未觸發）
+    """
+    if atr_value is None or np.isnan(atr_value):
+        return False
+    
+    stop_loss_price = entry_price - (atr_value * multiplier)
+    
+    return current_price <= stop_loss_price
+
+
+def calculate_atr_stop_levels(
+    data: pd.DataFrame,
+    entries: pd.Series,
+    atr_period: int = 14,
+    atr_multiplier: float = 2.0
+) -> Tuple[pd.Series, pd.Series]:
+    """
+    計算基於 ATR 的止損位（向量化）
+    
+    Args:
+        data: 包含 OHLC 數據的 DataFrame
+        entries: 入場信號（布爾值 Series）
+        atr_period: ATR 計算週期
+        atr_multiplier: ATR 倍數
+        
+    Returns:
+        (止損價格 Series, ATR 值 Series)
+    """
+    # 計算 ATR
+    atr = calculate_atr(data, period=atr_period)
+    
+    # 獲取入場價格
+    entry_prices = data['Close'].where(entries).ffill()
+    
+    # 計算止損價格
+    stop_prices = entry_prices - (atr * atr_multiplier)
+    
+    return stop_prices, atr
+
+
+def run_strategy_with_atr_stop(
+    data: pd.DataFrame,
+    entries: pd.Series,
+    exits: pd.Series,
+    initial_cash: float = 10000.0,
+    fees: float = 0.001,
+    atr_period: int = 14,
+    atr_multiplier: float = 2.0
+) -> Tuple[vbt.Portfolio, pd.DataFrame]:
+    """
+    運行帶有 ATR 追蹤止損的策略
+    
+    Args:
+        data: 包含 OHLCV 數據的 DataFrame
+        entries: 入場信號
+        exits: 出場信號
+        initial_cash: 初始資金
+        fees: 交易費用
+        atr_period: ATR 週期
+        atr_multiplier: ATR 倍數
+        
+    Returns:
+        (Portfolio 對象, 包含止損信息的 DataFrame)
+    """
+    close = data['Close']
+    
+    # 計算 ATR 止損位
+    stop_prices, atr = calculate_atr_stop_levels(
+        data, entries, atr_period, atr_multiplier
+    )
+    
+    # 檢測 ATR 止損觸發
+    atr_stops = close <= stop_prices
+    
+    # 合併原始出場信號和 ATR 止損
+    combined_exits = exits | atr_stops
+    
+    # 運行回測
+    portfolio = vbt.Portfolio.from_signals(
+        close=close,
+        entries=entries,
+        exits=combined_exits,
+        init_cash=initial_cash,
+        fees=fees,
+        freq="1D"
+    )
+    
+    # 創建報告 DataFrame
+    report_df = pd.DataFrame({
+        'Close': close,
+        'Entry': entries,
+        'Original_Exit': exits,
+        'ATR': atr,
+        'Stop_Price': stop_prices,
+        'ATR_Stop': atr_stops,
+        'Final_Exit': combined_exits
+    }, index=data.index)
+    
+    print(f"\n✅ ATR 止損統計:")
+    print(f"   ATR 週期: {atr_period}")
+    print(f"   ATR 倍數: {atr_multiplier}")
+    print(f"   觸發 ATR 止損次數: {atr_stops.sum()}")
+    print(f"   原始出場信號次數: {exits.sum()}")
+    print(f"   總出場次數: {combined_exits.sum()}")
+    
+    return portfolio, report_df

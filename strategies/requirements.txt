@@ -13,6 +13,13 @@ mysql-connector-python==8.1.0
 # Trade Execution
 alpaca-trade-api==3.0.2
 
+# Scheduling
+APScheduler==3.10.4
+pytz==2023.3
+
+# Notifications
+requests>=2.31.0
+
 # Utilities
 python-dotenv==1.0.0
 
