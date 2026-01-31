@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>美股交易策略儀表板</title>
+    
+    <!-- Bootstrap CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    
+    <style>
+        body {
+            background-color: #f8f9fa;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+        
+        .navbar {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        
+        .card {
+            border: none;
+            border-radius: 10px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        
+        .card-header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            font-weight: 600;
+            border-radius: 10px 10px 0 0 !important;
+        }
+        
+        .stat-card {
+            text-align: center;
+            padding: 20px;
+        }
+        
+        .stat-value {
+            font-size: 2rem;
+            font-weight: bold;
+            margin: 10px 0;
+        }
+        
+        .stat-label {
+            color: #6c757d;
+            font-size: 0.9rem;
+        }
+        
+        .positive {
+            color: #28a745;
+        }
+        
+        .negative {
+            color: #dc3545;
+        }
+        
+        #chartCanvas {
+            max-height: 400px;
+        }
+        
+        .strategy-item {
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+        
+        .strategy-item:hover {
+            background-color: #f0f0f0;
+        }
+        
+        .strategy-item.active {
+            background-color: #e7f1ff;
+            border-left: 3px solid #667eea;
+        }
+        
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #6c757d;
+        }
+    </style>
+</head>
+<body>
+    <!-- 導航欄 -->
+    <nav class="navbar navbar-dark mb-4">
+        <div class="container-fluid">
+            <span class="navbar-brand mb-0 h1">
+                📈 美股交易策略儀表板
+            </span>
+            <span class="text-white">
+                <small id="lastUpdate">載入中...</small>
+            </span>
+        </div>
+    </nav>
+
+    <div class="container-fluid">
+        <div class="row">
+            <!-- 左側：策略列表 -->
+            <div class="col-md-3">
+                <div class="card">
+                    <div class="card-header">
+                        策略列表
+                    </div>
+                    <div class="card-body p-0">
+                        <div id="strategyList" class="list-group list-group-flush">
+                            <div class="loading">
+                                <div class="spinner-border text-primary" role="status">
+                                    <span class="visually-hidden">載入中...</span>
+                                </div>
+                                <p class="mt-2">載入策略數據...</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 右側：圖表和統計 -->
+            <div class="col-md-9">
+                <!-- 績效統計卡片 -->
+                <div class="row" id="statsCards">
+                    <div class="col-md-3">
+                        <div class="card stat-card">
+                            <div class="stat-label">總回報</div>
+                            <div class="stat-value" id="totalReturn">-</div>
+                        </div>
+                    </div>
+                    <div class="col-md-3">
+                        <div class="card stat-card">
+                            <div class="stat-label">夏普比率</div>
+                            <div class="stat-value" id="sharpeRatio">-</div>
+                        </div>
+                    </div>
+                    <div class="col-md-3">
+                        <div class="card stat-card">
+                            <div class="stat-label">最大回撤</div>
+                            <div class="stat-value" id="maxDrawdown">-</div>
+                        </div>
+                    </div>
+                    <div class="col-md-3">
+                        <div class="card stat-card">
+                            <div class="stat-label">策略名稱</div>
+                            <div class="stat-value" style="font-size: 1.2rem;" id="strategyName">-</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 權益曲線圖表 -->
+                <div class="card">
+                    <div class="card-header">
+                        權益曲線
+                    </div>
+                    <div class="card-body">
+                        <canvas id="chartCanvas"></canvas>
+                    </div>
+                </div>
+
+                <!-- 交易記錄表格 -->
+                <div class="card">
+                    <div class="card-header">
+                        交易記錄
+                    </div>
+                    <div class="card-body">
+                        <div class="table-responsive">
+                            <table class="table table-striped table-hover" id="tradesTable">
+                                <thead>
+                                    <tr>
+                                        <th>股票代碼</th>
+                                        <th>入場日期</th>
+                                        <th>出場日期</th>
+                                        <th>入場價格</th>
+                                        <th>出場價格</th>
+                                        <th>損益</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="tradesBody">
+                                    <tr>
+                                        <td colspan="6" class="text-center text-muted">請選擇一個策略</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Bootstrap JS -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    
+    <script>
+        let currentChart = null;
+        let strategies = [];
+
+        // 頁面載入時初始化
+        document.addEventListener('DOMContentLoaded', function() {
+            loadStrategies();
+        });
+
+        // 載入策略列表
+        async function loadStrategies() {
+            try {
+                const response = await fetch('/api/strategies');
+                strategies = await response.json();
+                
+                const listContainer = document.getElementById('strategyList');
+                
+                if (strategies.length === 0) {
+                    listContainer.innerHTML = '<div class="p-3 text-center text-muted">尚無策略數據</div>';
+                    return;
+                }
+                
+                listContainer.innerHTML = strategies.map(strategy => `
+                    <div class="list-group-item strategy-item" onclick="selectStrategy(${strategy.id})">
+                        <div class="d-flex w-100 justify-content-between">
+                            <h6 class="mb-1">${strategy.strategy_name}</h6>
+                            <small class="${strategy.total_return >= 0 ? 'positive' : 'negative'}">
+                                ${(strategy.total_return * 100).toFixed(2)}%
+                            </small>
+                        </div>
+                        <small class="text-muted">${strategy.start_date} ~ ${strategy.end_date}</small>
+                    </div>
+                `).join('');
+                
+                // 自動選擇第一個策略
+                if (strategies.length > 0) {
+                    selectStrategy(strategies[0].id);
+                }
+                
+                document.getElementById('lastUpdate').textContent = 
+                    `最後更新: ${new Date().toLocaleString('zh-TW')}`;
+                
+            } catch (error) {
+                console.error('載入策略失敗:', error);
+                document.getElementById('strategyList').innerHTML = 
+                    '<div class="p-3 text-danger">載入失敗，請檢查後端服務</div>';
+            }
+        }
+
+        // 選擇策略
+        async function selectStrategy(runId) {
+            // 更新選中狀態
+            document.querySelectorAll('.strategy-item').forEach(item => {
+                item.classList.remove('active');
+            });
+            event.currentTarget?.classList.add('active');
+            
+            // 找到對應的策略數據
+            const strategy = strategies.find(s => s.id === runId);
+            if (strategy) {
+                updateStats(strategy);
+            }
+            
+            // 載入權益曲線
+            await loadEquityCurve(runId);
+            
+            // 載入交易記錄
+            await loadTrades(runId);
+        }
+
+        // 更新統計卡片
+        function updateStats(strategy) {
+            document.getElementById('strategyName').textContent = strategy.strategy_name;
+            
+            const totalReturn = strategy.total_return * 100;
+            const totalReturnEl = document.getElementById('totalReturn');
+            totalReturnEl.textContent = totalReturn.toFixed(2) + '%';
+            totalReturnEl.className = 'stat-value ' + (totalReturn >= 0 ? 'positive' : 'negative');
+            
+            document.getElementById('sharpeRatio').textContent = strategy.sharpe_ratio.toFixed(2);
+            
+            const maxDrawdown = strategy.max_drawdown * 100;
+            document.getElementById('maxDrawdown').textContent = maxDrawdown.toFixed(2) + '%';
+        }
+
+        // 載入權益曲線
+        async function loadEquityCurve(runId) {
+            try {
+                const response = await fetch(`/api/run/${runId}/equity`);
+                const data = await response.json();
+                
+                // 銷毀舊圖表
+                if (currentChart) {
+                    currentChart.destroy();
+                }
+                
+                // 創建新圖表
+                const ctx = document.getElementById('chartCanvas').getContext('2d');
+                currentChart = new Chart(ctx, {
+                    type: 'line',
+                    data: {
+                        labels: data.dates,
+                        datasets: [{
+                            label: '權益值',
+                            data: data.values,
+                            borderColor: '#667eea',
+                            backgroundColor: 'rgba(102, 126, 234, 0.1)',
+                            borderWidth: 2,
+                            fill: true,
+                            tension: 0.4
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: true,
+                        plugins: {
+                            legend: {
+                                display: true,
+                                position: 'top'
+                            },
+                            tooltip: {
+                                mode: 'index',
+                                intersect: false
+                            }
+                        },
+                        scales: {
+                            x: {
+                                display: true,
+                                title: {
+                                    display: true,
+                                    text: '日期'
+                                },
+                                ticks: {
+                                    maxRotation: 45,
+                                    minRotation: 45
+                                }
+                            },
+                            y: {
+                                display: true,
+                                title: {
+                                    display: true,
+                                    text: '權益值 ($)'
+                                }
+                            }
+                        }
+                    }
+                });
+                
+            } catch (error) {
+                console.error('載入權益曲線失敗:', error);
+            }
+        }
+
+        // 載入交易記錄
+        async function loadTrades(runId) {
+            try {
+                const response = await fetch(`/api/run/${runId}/trades`);
+                const trades = await response.json();
+                
+                const tbody = document.getElementById('tradesBody');
+                
+                if (trades.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted">無交易記錄</td></tr>';
+                    return;
+                }
+                
+                tbody.innerHTML = trades.map(trade => {
+                    const pnlClass = trade.pnl >= 0 ? 'positive' : 'negative';
+                    return `
+                        <tr>
+                            <td>${trade.symbol || 'N/A'}</td>
+                            <td>${trade.entry_date || '-'}</td>
+                            <td>${trade.exit_date || '-'}</td>
+                            <td>$${trade.entry_price.toFixed(2)}</td>
+                            <td>$${trade.exit_price.toFixed(2)}</td>
+                            <td class="${pnlClass}">$${trade.pnl.toFixed(2)}</td>
+                        </tr>
+                    `;
+                }).join('');
+                
+            } catch (error) {
+                console.error('載入交易記錄失敗:', error);
+            }
+        }
+
+        // 每 30 秒自動重新載入數據
+        setInterval(loadStrategies, 30000);
+    </script>
+</body>
+</html>

@@ -14,6 +14,8 @@ CREATE TABLE IF NOT EXISTS market_data (
     close DECIMAL(12, 4) NOT NULL,
     volume BIGINT NOT NULL,
     adj_close DECIMAL(12, 4),
+    pe_ratio DECIMAL(10, 2),
+    pb_ratio DECIMAL(10, 2),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     
     UNIQUE KEY uk_symbol_timestamp (symbol, timestamp),

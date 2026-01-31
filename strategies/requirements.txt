@@ -1,8 +1,8 @@
 # Core Data & Backtesting
-numpy==1.23.5
-pandas==2.0.3
-numba==0.56.4
-vectorbt==0.25.5
+numpy>=1.24.0
+pandas>=2.0.0
+numba>=0.56.0
+vectorbt>=0.26.0
 plotly==5.14.1
 yfinance==0.2.28
 

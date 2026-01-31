@@ -2,15 +2,17 @@
 Market Data Adapter for the US Stock Trading System.
 
 This module provides functions to fetch market data from various sources,
-primarily using yfinance for historical OHLCV data.
+primarily using yfinance for historical OHLCV data and fundamental data.
 
 Author: Quant System
 Created: 2025-12-31
+Updated: 2026-01-31 - Added fundamental data (PE/PB) and database integration
 """
 
-from typing import Optional
+from typing import List, Optional
 import pandas as pd
 import yfinance as yf
+from .database import DatabaseAdapter
 
 
 def fetch_data(
@@ -41,28 +43,115 @@ def fetch_data(
         >>> df = fetch_data("SPY", period="1y", interval="1d")
         >>> print(df.head())
     """
-    print(f"📊 Fetching data for {symbol} (period={period}, interval={interval})...")
+    print(f"📊 正在下載 {symbol} 數據 (period={period}, interval={interval})...")
     
     try:
         ticker = yf.Ticker(symbol)
         df = ticker.history(period=period, interval=interval)
         
         if df.empty:
-            raise ValueError(f"No data returned for symbol: {symbol}")
+            raise ValueError(f"無法獲取數據: {symbol}")
         
-        # Clean up the dataframe
+        # 清理數據
         df = df.dropna()
         
-        # Ensure proper column names
-        df.columns = [col.replace(" ", "_") for col in df.columns]
-        
-        print(f"✅ Successfully fetched {len(df)} rows of data for {symbol}")
-        print(f"   Date range: {df.index[0]} to {df.index[-1]}")
+        print(f"✅ 成功下載 {symbol}: {len(df)} 行數據")
+        print(f"   日期範圍: {df.index[0]} 到 {df.index[-1]}")
         
         return df
         
     except Exception as e:
-        raise ValueError(f"Failed to fetch data for {symbol}: {e}") from e
+        raise ValueError(f"下載 {symbol} 失敗: {e}") from e
+
+
+def fetch_fundamentals(symbol: str) -> dict:
+    """
+    獲取基本面數據 (PE/PB 等)
+    
+    Args:
+        symbol: 股票代碼
+        
+    Returns:
+        包含基本面數據的字典
+    """
+    try:
+        ticker = yf.Ticker(symbol)
+        info = ticker.info
+        
+        return {
+            'pe_ratio': info.get('trailingPE', None),
+            'pb_ratio': info.get('priceToBook', None),
+            'forward_pe': info.get('forwardPE', None),
+            'peg_ratio': info.get('pegRatio', None)
+        }
+    except Exception as e:
+        print(f"⚠️  無法獲取 {symbol} 基本面數據: {e}")
+        return {}
+
+
+def download_and_save(
+    symbols: List[str] = None,
+    period: str = "2y",
+    interval: str = "1d"
+) -> dict:
+    """
+    下載市場數據並保存到數據庫
+    
+    Args:
+        symbols: 股票代碼列表，默認為 ['SPY', 'QQQ', 'AAPL', 'NVDA']
+        period: 數據週期
+        interval: 數據粒度
+        
+    Returns:
+        下載結果統計字典
+    """
+    if symbols is None:
+        symbols = ['SPY', 'QQQ', 'AAPL', 'NVDA']
+    
+    db = DatabaseAdapter()
+    results = {
+        'success': [],
+        'failed': [],
+        'total_rows': 0
+    }
+    
+    print(f"\n{'='*60}")
+    print(f"開始下載 {len(symbols)} 個股票的數據...")
+    print(f"{'='*60}\n")
+    
+    for symbol in symbols:
+        try:
+            # 下載 OHLCV 數據
+            df = fetch_data(symbol, period=period, interval=interval)
+            
+            # 嘗試獲取基本面數據
+            fundamentals = fetch_fundamentals(symbol)
+            if fundamentals.get('pe_ratio'):
+                df['pe_ratio'] = fundamentals['pe_ratio']
+            if fundamentals.get('pb_ratio'):
+                df['pb_ratio'] = fundamentals['pb_ratio']
+            
+            # 保存到數據庫
+            rows_saved = db.save_market_data(df, symbol)
+            
+            results['success'].append(symbol)
+            results['total_rows'] += rows_saved
+            
+        except Exception as e:
+            print(f"❌ {symbol} 處理失敗: {str(e)}")
+            results['failed'].append(symbol)
+    
+    db.close()
+    
+    # 打印摘要
+    print(f"\n{'='*60}")
+    print(f"下載完成摘要:")
+    print(f"  成功: {len(results['success'])} 個股票")
+    print(f"  失敗: {len(results['failed'])} 個股票")
+    print(f"  總行數: {results['total_rows']}")
+    print(f"{'='*60}\n")
+    
+    return results
 
 
 def fetch_multiple(
