@@ -14,26 +14,11 @@ import hmac
 import base64
 from flask import Blueprint, request, abort, jsonify
 from functools import wraps
-from pathlib import Path
-from typing import Optional
 
-# Docker Secrets 路徑
-SECRETS_PATH = Path("/run/secrets")
-
-
-def get_secret(secret_name: str, default: Optional[str] = None) -> Optional[str]:
-    """從 Docker Secrets 或環境變量獲取密鑰"""
-    secret_file = SECRETS_PATH / secret_name
-    if secret_file.exists():
-        try:
-            return secret_file.read_text().strip()
-        except (IOError, PermissionError):
-            pass
-    
-    if SECRETS_PATH.exists():
-        return default
-    
-    return os.environ.get(secret_name.upper(), default)
+# 導入安全工具
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+from security import get_secret
 
 
 # 創建 Blueprint

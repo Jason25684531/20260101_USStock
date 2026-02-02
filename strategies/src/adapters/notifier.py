@@ -13,25 +13,8 @@ import json
 import requests
 from datetime import datetime
 from typing import Optional, Dict, Any
-from pathlib import Path
 
-# Docker Secrets 路徑
-SECRETS_PATH = Path("/run/secrets")
-
-
-def get_secret(secret_name: str, default: Optional[str] = None) -> Optional[str]:
-    """從 Docker Secrets 或環境變量獲取密鑰"""
-    secret_file = SECRETS_PATH / secret_name
-    if secret_file.exists():
-        try:
-            return secret_file.read_text().strip()
-        except (IOError, PermissionError):
-            pass
-    
-    if SECRETS_PATH.exists():
-        return default
-    
-    return os.environ.get(secret_name.upper(), default)
+from utils.security import get_secret
 
 
 class LineNotifier:

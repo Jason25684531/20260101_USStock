@@ -6,16 +6,14 @@
 
 ## 📖 概述
 
-這是一套自動化的美股量化交易系統，採用微服務架構，支持多策略回測、**Alpaca Paper Trading 模擬交易**、自動調度、Line Bot 通知等功能。
+這是一套自動化的美股量化交易系統，採用微服務架構，支持多策略回測、自動調度、Line Bot 通知等功能。
 
 ### 主要特點
 
-- 📈 **Paper Trading**: 整合 Alpaca API，支持無風險模擬交易（[詳細指南](PAPER_TRADING_GUIDE.md)）
 - 🤖 **自動化調度**: APScheduler 每日美股收盤後自動執行策略分析
 - 📱 **即時通知**: Line Bot 推送交易信號和每日摘要
 - 📊 **多策略引擎**: Momentum, Value, Chips+Momentum, Growth PEG 等策略
 - 🔐 **安全設計**: Docker Secrets 管理敏感資訊，零信任架構
-- 🛡️ **風險控制**: 訂單上限保護、購買力驗證、Paper 模式硬編碼
 - 📈 **Web Dashboard**: 視覺化回測結果和績效報告
 
 ## 🏗️ 系統架構
@@ -46,19 +44,8 @@
 | 服務 | 描述 | 技術棧 |
 |------|------|--------|
 | **db** | 資料庫服務 | MySQL 8.0, 持久化儲存 |
-| **strategy_engine** | 策略執行引擎 | Python 3.10, VectorBT, APScheduler, Alpaca API |
+| **strategy_engine** | 策略執行引擎 | Python 3.10, VectorBT, APScheduler |
 | **web_dashboard** | Web 介面 + Line Bot | Flask, Chart.js, Line Bot SDK |
-
-## 🎯 交易模式
-
-系統支持兩種運行模式，通過環境變數 `TRADING_MODE` 控制：
-
-| 模式 | 說明 | 適用場景 |
-|------|------|----------|
-| **backtest** (默認) | 純回測模式，不執行真實交易 | 策略開發、歷史數據分析 |
-| **paper** | Paper Trading 模擬交易 | 策略驗證、實戰測試 |
-
-詳細說明請參閱 [Paper Trading 指南](PAPER_TRADING_GUIDE.md)。
 
 ## 🚀 快速開始
 
@@ -81,15 +68,10 @@ mkdir .secrets
 .secrets/
 ├── db_root_password.txt    # MySQL root 密碼
 ├── db_password.txt         # 應用程式資料庫密碼
-├── alpaca_key.txt          # Alpaca API Key (Paper Trading)
-├── alpaca_secret.txt       # Alpaca API Secret (Paper Trading)
 ├── line_channel_token.txt  # Line Channel Access Token
 ├── line_channel_secret.txt # Line Channel Secret
 └── line_user_id.txt        # 接收通知的 Line User ID
 ```
-
-**💡 提示**: Alpaca Paper Trading 是免費的模擬交易服務，不需要真實資金。
-前往 [Alpaca Markets](https://alpaca.markets/) 註冊並獲取 API 憑證。
 
 ### 3. 啟動服務
 

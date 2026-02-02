@@ -9,15 +9,14 @@ Created: 2025-12-31
 Updated: 2026-01-31 - 添加 Line Bot 整合
 """
 import os
-from pathlib import Path
-from typing import Optional
 from flask import Flask, render_template, jsonify
 from flask_httpauth import HTTPBasicAuth
 from werkzeug.security import check_password_hash, generate_password_hash
 from sqlalchemy import create_engine, text
 from datetime import datetime
 
-# 導入 Line Bot Blueprint
+# 導入安全工具和 Line Bot Blueprint
+from security import get_secret
 from bot import line_bot_bp
 
 app = Flask(__name__)
@@ -25,26 +24,6 @@ auth = HTTPBasicAuth()
 
 # 註冊 Line Bot Blueprint
 app.register_blueprint(line_bot_bp, url_prefix='/bot')
-
-# ============================================
-# 安全工具函數（避免重複導入問題）
-# ============================================
-SECRETS_PATH = Path("/run/secrets")
-
-
-def get_secret(secret_name: str, default: Optional[str] = None) -> Optional[str]:
-    """從 Docker Secrets 或環境變量獲取密鑰"""
-    secret_file = SECRETS_PATH / secret_name
-    if secret_file.exists():
-        try:
-            return secret_file.read_text().strip()
-        except (IOError, PermissionError):
-            pass
-    
-    if SECRETS_PATH.exists():
-        return default
-    
-    return os.environ.get(secret_name.upper(), default)
 
 
 # ============================================

@@ -1,5 +1,119 @@
 # 更新日志
 
+## 2026-02-02 - Alpaca Paper Trading 整合實施 ✅
+
+### ✅ 已完成功能
+
+#### 1. Alpaca Broker 適配器 (The Hands)
+- **新建文件** (`strategies/src/adapters/broker.py`)
+  - `AlpacaBroker` 類：完整的 Paper Trading 介面
+  - **安全特性**:
+    - 硬編碼 PAPER_BASE_URL 防止意外真實交易
+    - MAX_ORDER_VALUE = $10,000 安全上限
+    - 購買力驗證（買入前檢查）
+    - 使用 `require_secret()` 安全加載 API 憑證
+  - **核心方法**:
+    - `get_account()`: 獲取帳戶資訊（現金、購買力、權益）
+    - `get_positions()`: 獲取當前持倉
+    - `get_current_price()`: 獲取實時價格
+    - `check_risk()`: 預交易風險檢查
+    - `submit_order()`: 提交訂單（市價/限價）
+    - `cancel_order()`: 取消訂單
+    - `close_position()`: 平倉
+
+#### 2. 交易執行引擎整合 (The Brain)
+- **修改文件** (`strategies/src/main.py`)
+  - **TRADING_MODE 環境變數**:
+    - `backtest`: 回測模式（默認）
+    - `paper`: Paper Trading 模式（連接 Alpaca）
+  - **新增 `execute_trades()` 函數**:
+    1. 計算目標倉位（策略輸出）
+    2. 獲取當前倉位（Alpaca API）
+    3. 計算差異 (Diff = Target - Current)
+    4. 執行調倉訂單（買入/賣出）
+    5. 發送 Line 通知
+  - **工作流程優化**:
+    - Broker 僅在 paper 模式初始化
+    - 價值策略僅在 backtest 模式運行（節省資源）
+    - 實時帳戶資訊顯示
+
+#### 3. 測試腳本
+- **新建文件** (`strategies/test_broker_connection.py`)
+  - 測試 Alpaca API 連接
+  - 驗證帳戶資訊獲取
+  - 測試持倉查詢
+  - 測試價格獲取
+  - 驗證風險檢查機制
+- **新建文件** (`strategies/test_integration_logic.py`)
+  - 模組導入驗證
+  - 類別結構檢查
+  - main.py 整合邏輯驗證
+  - Docker 配置檢查
+  - 依賴套件檢查
+
+#### 4. 代碼重構與清理
+- **消除重複代碼**:
+  - 移除 `strategies/src/adapters/notifier.py` 中重複的 `get_secret()`
+  - 移除 `web/app.py` 中重複的 `get_secret()`
+  - 移除 `web/bot/handler.py` 中重複的 `get_secret()`
+  - 新建 `web/security.py` 統一管理 Web 服務的 secrets
+  - 所有模組統一使用 `utils.security` 或 `security` 模組
+- **Secrets 文件整理**:
+  - 創建 `.secrets/CLEANUP_GUIDE.md` 文檔
+  - 識別並標記重複的 secrets 文件
+  - 標準化命名規範（使用 .txt 擴展名）
+
+#### 5. Docker 配置驗證
+- **docker-compose.yml 已配置**:
+  - `alpaca_key` secret 映射
+  - `alpaca_secret` secret 映射
+  - Strategy Engine 服務掛載 secrets
+  - 支援 TRADING_MODE 環境變數
+
+#### 6. 依賴套件
+- **已確認** `strategies/requirements.txt`:
+  - `alpaca-trade-api==3.0.2` ✅
+  - 所有必要套件已列出
+
+### 📋 使用說明
+
+#### 啟動 Paper Trading 模式
+```bash
+# 方法 1: Docker (推薦)
+docker-compose up -d
+docker-compose exec strategy_engine bash -c "TRADING_MODE=paper python src/main.py"
+
+# 方法 2: 本地執行
+cd strategies
+source venv/bin/activate  # Windows: .\venv\Scripts\Activate.ps1
+export TRADING_MODE=paper  # Windows: $env:TRADING_MODE="paper"
+python src/main.py
+```
+
+#### 測試 Broker 連接
+```bash
+cd strategies
+python test_broker_connection.py  # 需要真實 API 憑證
+python test_integration_logic.py  # 不需要憑證（邏輯驗證）
+```
+
+#### 設置 Alpaca API 憑證
+1. 在 [Alpaca](https://alpaca.markets/) 註冊 Paper Trading 帳戶
+2. 獲取 API Key 和 Secret
+3. 填入憑證:
+   ```bash
+   echo "YOUR_API_KEY" > .secrets/alpaca_key.txt
+   echo "YOUR_SECRET" > .secrets/alpaca_secret.txt
+   ```
+
+### ⚠️ 注意事項
+- **PAPER_BASE_URL 已硬編碼** 為 `https://paper-api.alpaca.markets`，無法意外連接真實帳戶
+- **訂單上限** 為 $10,000，防止胖手指錯誤
+- **購買力驗證** 在提交訂單前執行
+- **預設模式** 為 `backtest`，需要明確設置 `TRADING_MODE=paper` 才會執行真實交易
+
+---
+
 ## 2026-01-31 - 自動化調度 & Line Bot 通知實施
 
 ### ✅ 已完成功能
@@ -48,6 +162,7 @@
 
 #### 6. 代碼清理
 - **刪除重複文件**: `web/security.py` (與 `strategies/src/utils/security.py` 重複)
+  - **更新 (2026-02-02)**: 恢復 `web/security.py`，因 web 和 strategies 是獨立服務
 - **統一 get_secret()**: 在 `web/app.py` 中內聯實現，避免跨容器依賴
 - **新增測試腳本**: `strategies/test_line_notification.py`
 
