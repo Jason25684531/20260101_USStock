@@ -65,17 +65,21 @@ class DatabaseAdapter:
         }
         df = df.rename(columns=column_mapping)
         
+        # 如果沒有 adj_close，使用 close 作為預設值
+        if 'adj_close' not in df.columns:
+            df['adj_close'] = df['close']
+        
         # 確保索引是 datetime 並命名為 timestamp
         df.index.name = 'timestamp'
         df = df.reset_index()
         
-        # 選擇需要的列
+        # 選擇需要的列（只選擇存在的列）
         columns_to_save = [
             'symbol', 'timestamp', 'open', 'high', 'low', 
             'close', 'volume', 'adj_close'
         ]
         
-        # 如果有 PE/PB 數據，也保存
+        # 添加可選列（如果存在）
         if 'pe_ratio' in df.columns:
             columns_to_save.append('pe_ratio')
         if 'pb_ratio' in df.columns:

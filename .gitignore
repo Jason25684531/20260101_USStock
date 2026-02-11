@@ -4,9 +4,11 @@
 .secrets/
 *.pem
 *.key
+openspec/
 
 # Python
 venv/
+.venv/
 env/
 *.pyc
 __pycache__/
@@ -61,3 +63,10 @@ htmlcov/
 # Jupyter
 .ipynb_checkpoints/
 *.ipynb
+
+# MockBroker State Files (Local Simulation)
+data/mock_broker_state.json
+**/test_broker_state.json
+test_broker_state.json
+
+data/

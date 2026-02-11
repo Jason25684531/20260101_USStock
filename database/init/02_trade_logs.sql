@@ -40,6 +40,8 @@ CREATE TABLE IF NOT EXISTS trade_logs (
     entry_price DECIMAL(12, 4),
     exit_price DECIMAL(12, 4),
     pnl DECIMAL(16, 4),
+    confidence FLOAT DEFAULT NULL COMMENT 'ML 模型預測置信度 (0-1)',
+    top_features JSON DEFAULT NULL COMMENT 'ML 預測時最重要的特徵及數值',
     
     FOREIGN KEY (run_id) REFERENCES backtest_runs(id) ON DELETE CASCADE,
     INDEX idx_run_id (run_id),

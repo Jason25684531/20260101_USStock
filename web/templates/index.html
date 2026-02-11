@@ -159,6 +159,73 @@
                     </div>
                 </div>
 
+                <!-- ML Model Confidence Panel -->
+                <div class="card" id="mlStatusCard">
+                    <div class="card-header" style="background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);">
+                        🤖 ML 模型狀態 &amp; 信心度
+                    </div>
+                    <div class="card-body">
+                        <div class="row mb-3">
+                            <div class="col-md-6">
+                                <h6>模型特徵重要性 (Top 10)</h6>
+                                <ul id="featureImportanceList" class="list-group list-group-flush small">
+                                    <li class="list-group-item text-muted">載入中...</li>
+                                </ul>
+                            </div>
+                            <div class="col-md-6">
+                                <h6>最近 ML 信號 (含置信度)</h6>
+                                <div class="table-responsive">
+                                    <table class="table table-sm table-striped">
+                                        <thead><tr><th>股票</th><th>日期</th><th>置信度</th></tr></thead>
+                                        <tbody id="mlSignalsBody">
+                                            <tr><td colspan="3" class="text-muted">載入中...</td></tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 每日選股推薦 -->
+                <div class="card" id="recommendationsCard">
+                    <div class="card-header" style="background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);">
+                        🏆 每日選股推薦 (Top 5)
+                    </div>
+                    <div class="card-body">
+                        <div class="d-flex justify-content-between align-items-center mb-3">
+                            <div>
+                                <label class="me-2 small">日期:</label>
+                                <input type="date" id="recDate" class="form-control form-control-sm d-inline-block" style="width:160px;">
+                            </div>
+                            <button class="btn btn-sm btn-outline-primary" onclick="loadRecommendations()">🔄 重新載入</button>
+                        </div>
+                        <div class="table-responsive">
+                            <table class="table table-sm table-striped table-hover">
+                                <thead>
+                                    <tr>
+                                        <th>#</th>
+                                        <th>股票</th>
+                                        <th>信號</th>
+                                        <th>總分</th>
+                                        <th>突破</th>
+                                        <th>加速</th>
+                                        <th>PEG</th>
+                                        <th>杜邦</th>
+                                        <th>ML</th>
+                                        <th>現價</th>
+                                        <th>支撐1</th>
+                                        <th>壓力1</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="recBody">
+                                    <tr><td colspan="12" class="text-center text-muted">載入中...</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- 交易記錄表格 -->
                 <div class="card">
                     <div class="card-header">
@@ -200,6 +267,10 @@
         // 頁面載入時初始化
         document.addEventListener('DOMContentLoaded', function() {
             loadStrategies();
+            loadMLStatus();
+            // 初始化推薦日期為今天
+            document.getElementById('recDate').value = new Date().toISOString().slice(0, 10);
+            loadRecommendations();
         });
 
         // 載入策略列表
@@ -380,6 +451,89 @@
 
         // 每 30 秒自動重新載入數據
         setInterval(loadStrategies, 30000);
+        setInterval(loadMLStatus, 30000);
+        setInterval(loadRecommendations, 60000);
+
+        // 載入每日推薦
+        async function loadRecommendations() {
+            try {
+                const dateVal = document.getElementById('recDate').value;
+                let url = '/api/recommendations?limit=10';
+                if (dateVal) url += '&date=' + dateVal;
+
+                const response = await fetch(url);
+                const data = await response.json();
+                const tbody = document.getElementById('recBody');
+
+                if (!data.recommendations || data.recommendations.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="12" class="text-center text-muted">該日無推薦數據</td></tr>';
+                    return;
+                }
+
+                tbody.innerHTML = data.recommendations.map(r => {
+                    const pass = v => v ? '<span class="text-success">✓</span>' : '<span class="text-muted">✗</span>';
+                    const sigClass = r.signal_type === 'BUY' ? 'positive' : 'text-muted';
+                    const mlConf = r.ml_confidence != null ? (r.ml_confidence * 100).toFixed(0) + '%' : '-';
+                    return `<tr>
+                        <td><strong>${r.rank}</strong></td>
+                        <td><strong>${r.symbol}</strong></td>
+                        <td class="${sigClass}">${r.signal_type}</td>
+                        <td>${r.total_score.toFixed(2)}</td>
+                        <td>${pass(r.breakout_pass)}</td>
+                        <td>${pass(r.acceleration_pass)}</td>
+                        <td>${pass(r.peg_pass)}</td>
+                        <td>${pass(r.dupont_pass)}</td>
+                        <td>${mlConf}</td>
+                        <td>$${r.current_price.toFixed(2)}</td>
+                        <td>$${r.support_1 ? r.support_1.toFixed(2) : '-'}</td>
+                        <td>$${r.resistance_1 ? r.resistance_1.toFixed(2) : '-'}</td>
+                    </tr>`;
+                }).join('');
+            } catch (error) {
+                console.error('載入推薦數據失敗:', error);
+                document.getElementById('recBody').innerHTML =
+                    '<tr><td colspan="12" class="text-center text-danger">載入失敗</td></tr>';
+            }
+        }
+
+        // 載入 ML 模型狀態
+        async function loadMLStatus() {
+            try {
+                const response = await fetch('/api/ml_status');
+                const data = await response.json();
+
+                // Feature Importance
+                const fiList = document.getElementById('featureImportanceList');
+                if (data.feature_importance && data.feature_importance.length > 0) {
+                    fiList.innerHTML = data.feature_importance.map(f =>
+                        `<li class="list-group-item d-flex justify-content-between py-1">
+                            <span>${f.feature}</span>
+                            <span class="badge bg-primary">${f.importance.toFixed(4)}</span>
+                        </li>`
+                    ).join('');
+                } else {
+                    fiList.innerHTML = '<li class="list-group-item text-muted">模型尚未載入</li>';
+                }
+
+                // Recent Signals
+                const tbody = document.getElementById('mlSignalsBody');
+                if (data.recent_signals && data.recent_signals.length > 0) {
+                    tbody.innerHTML = data.recent_signals.map(s => {
+                        const conf = s.confidence != null ? (s.confidence * 100).toFixed(1) + '%' : '-';
+                        const confClass = s.confidence >= 0.7 ? 'positive' : (s.confidence <= 0.3 ? 'negative' : '');
+                        return `<tr>
+                            <td>${s.symbol}</td>
+                            <td>${s.entry_date || '-'}</td>
+                            <td class="${confClass}">${conf}</td>
+                        </tr>`;
+                    }).join('');
+                } else {
+                    tbody.innerHTML = '<tr><td colspan="3" class="text-muted">無 ML 信號</td></tr>';
+                }
+            } catch (error) {
+                console.error('載入 ML 狀態失敗:', error);
+            }
+        }
     </script>
 </body>
 </html>

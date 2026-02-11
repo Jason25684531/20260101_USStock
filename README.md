@@ -13,7 +13,8 @@
 - 📈 **Paper Trading**: 整合 Alpaca API，支持無風險模擬交易（[詳細指南](PAPER_TRADING_GUIDE.md)）
 - 🤖 **自動化調度**: APScheduler 每日美股收盤後自動執行策略分析
 - 📱 **即時通知**: Line Bot 推送交易信號和每日摘要
-- 📊 **多策略引擎**: Momentum, Value, Chips+Momentum, Growth PEG 等策略
+- 📊 **多策略引擎**: Momentum, Value, Breakout, Acceleration, PEG, DuPont 等策略
+- 🏆 **每日選股推薦**: 4 大規則策略 + ML 信心度評分 + 支撐壓力 → Top 5 推薦
 - 🔐 **安全設計**: Docker Secrets 管理敏感資訊，零信任架構
 - 🛡️ **風險控制**: 訂單上限保護、購買力驗證、Paper 模式硬編碼
 - 📈 **Web Dashboard**: 視覺化回測結果和績效報告
@@ -49,16 +50,53 @@
 | **strategy_engine** | 策略執行引擎 | Python 3.10, VectorBT, APScheduler, Alpaca API |
 | **web_dashboard** | Web 介面 + Line Bot | Flask, Chart.js, Line Bot SDK |
 
-## 🎯 交易模式
+## 🎯 交易模式與策略類型
 
-系統支持兩種運行模式，通過環境變數 `TRADING_MODE` 控制：
+系統支持兩種運行模式和兩種策略類型，通過環境變數控制：
+
+### 交易模式 (TRADING_MODE)
 
 | 模式 | 說明 | 適用場景 |
 |------|------|----------|
 | **backtest** (默認) | 純回測模式，不執行真實交易 | 策略開發、歷史數據分析 |
 | **paper** | Paper Trading 模擬交易 | 策略驗證、實戰測試 |
+| **simulation** | 本地模擬交易 (MockBroker) | 離線測試、快速驗證 |
 
-詳細說明請參閱 [Paper Trading 指南](PAPER_TRADING_GUIDE.md)。
+### 策略類型 (STRATEGY_TYPE)
+
+| 類型 | 說明 | 使用方法 |
+|------|------|----------|
+| **traditional** (默認) | 動量 + 價值策略 | `export STRATEGY_TYPE=traditional` |
+| **ml** | 機器學習策略 (XGBoost) | `export STRATEGY_TYPE=ml` |
+| **screener** | 📊 每日選股推薦 | `export STRATEGY_TYPE=screener` |
+
+**ML 策略特點**:
+- 基於 XGBoost 分類器預測股票未來走勢
+- 整合價格、宏觀、基本面三種數據源（**25 個特徵**，含技術指標 + 基本面）
+- **Long-Only 策略**: BUY=做多，HOLD/SELL=持現金（不做空）
+- **買入閾值 0.55**（`buy_threshold` 可配置，默認 0.55）
+- 正則化防過擬合 (max_depth=5, lr=0.01, lambda=1.0, gamma=0.1)
+- Early Stopping 機制 (20% 驗證集，patience=10)
+- 輸出信號包含置信度 (confidence score 0-1)
+- **Rel_Strength_SPY**: 63 日相對強度 (個股 vs SPY)
+- **Volume_Price_Trend**: 10 日價量相關性
+- **Top-N 信心度排名**: 僅保留 Top 5 最高信心 BUY 信號 (`ML_TOP_N` 可配置)
+- **流動性過濾**: 20 日平均日交易額 < $5M 自動排除
+- **交易成本模擬**: MockBroker 0.1% 手續費扣除（含滑點）
+
+詳細說明請參閱 [Paper Trading 指南](doc/PAPER_TRADING_GUIDE.md) 和 [ML 平台指南](doc/ML_PLATFORM_GUIDE.md)。
+
+### Walk-Forward 回測 & ML 監控
+
+| 功能 | 說明 |
+|------|------|
+| **OOS 回測** | `python strategies/scripts/run_ml_backtest_2024.py --symbol AAPL --buy-threshold 0.55` (Gross + Net 權益曲線，Long-Only) |
+| **Mock 宏觀數據** | `python scripts/populate_mock_macro.py` (FRED 不可用時填入基線數據) |
+| **macro_data 防護** | `train_model.py` 自動建立 `macro_data` 表（若不存在） |
+| **ML 狀態 API** | `GET /api/ml_status` — 模型特徵重要性 + 最近信號置信度 |
+| **預測準確度圖** | `StrategyModel.plot_prediction_accuracy()` → `data/reports/prediction_accuracy.png` |
+
+**DB 新欄位**: `trade_logs` 表新增 `confidence FLOAT` 和 `top_features JSON`，用於追蹤 ML 信號信心度。
 
 ## 🚀 快速開始
 
@@ -155,12 +193,61 @@ USE_SCHEDULER=true
 
 ## 📊 策略列表
 
+### 回測策略
+
 | 策略 | 描述 | 邏輯 |
 |------|------|------|
-| **Momentum** | 動量策略 | Close > 200日最高價 |
-| **Value** | 價值策略 | PE < 15 且 PB < 1.5 |
-| **Chips+Momentum** | 籌碼+動量 | 機構持股 > 60% + SMA 黃金交叉 |
-| **Growth PEG** | 成長 PEG | PEG < 1 且 ROE > 15% |
+| **Momentum** | 動量策略 | Close > 200日最高價 (VectorBT) |
+| **Value** | 價值策略 | PE < 15 且 PB < 1.5 (VectorBT) |
+| **ML Strategy** | 機器學習 | XGBoost 25特徵 (Long-Only) |
+
+### 選股策略 (每日推薦)
+
+| 策略 | 描述 | 通過條件 |
+|------|------|----------|
+| **Breakout** | 創新高動能 | 200日新高 + RSI>60 + SMA多頭排列 |
+| **Acceleration** | 加速度指標 | 均速曲率上升 + 20日漲幅>0 |
+| **PEG** | 本益成長比 | PEG<1.5 + ROE>10% + OCF>0 |
+| **DuPont** | 杜邦分析 | ROE>5% + PB<8 + 資產周轉率>0.3 |
+
+## 🏆 每日選股推薦
+
+### 快速使用
+
+```bash
+# 基本掃描 (5 支股票)
+python strategies/scripts/run_daily_screener.py --symbols AAPL,MSFT,NVDA,GOOGL,META --top-n 5
+
+# 完整掃描 (51 股) + ML加權 + 存DB + Line通知
+python strategies/scripts/run_daily_screener.py --use-ml --save-db --notify
+
+# Walk-Forward 月度回測
+python strategies/scripts/run_screener_backtest.py --months 12 --top-n 5
+```
+
+### 評分機制
+
+- **規則分**: 4 策略各 0~1 分 (通過=1, 部分=score×0.5)
+- **ML 信心度**: 0~1 分 (可選)
+- **綜合分**: 0~5 分
+- **BUY 條件**: ≥2 策略通過 或 總分≥2.0
+
+### 支撐壓力
+
+- SMA(60/120/200) 支撐壓力判定
+- ATR(14)×1.5 動態帶寬
+- 20日高低價區間
+
+### 回測績效 (2025-02 → 2026-02)
+
+| 指標 | 數值 |
+|------|------|
+| 策略總報酬 | +7.11% |
+| 勝率 | 66.7% |
+| 年化 Sharpe | 0.51 |
+| 最大回撤 | -7.20% |
+
+---
 
 ## 🔧 開發指南
 
@@ -199,10 +286,22 @@ USStock/
 │   └── specs/             # 規格定義
 ├── strategies/            # 策略引擎
 │   ├── src/
+│   │   ├── config.py      # 🆕 共用常量與函式 (股票池/RSI/ATR/評分)
 │   │   ├── adapters/      # 數據適配器
 │   │   ├── core/          # 核心回測引擎
+│   │   ├── ml/            # ML 模型 (XGBoost)
+│   │   ├── screener/      # 每日選股引擎
+│   │   │   ├── engine.py          # 選股主引擎
+│   │   │   └── support_resistance.py  # 支撐壓力計算
 │   │   ├── strategies/    # 策略實現
+│   │   │   ├── momentum.py        # 動量 + Breakout + Acceleration
+│   │   │   ├── fundamental.py     # PEG + DuPont 篩選
+│   │   │   ├── value.py           # 價值策略
+│   │   │   └── ml_strategy.py     # ML 策略
 │   │   └── utils/         # 工具函數
+│   ├── scripts/
+│   │   ├── run_daily_screener.py   # 每日選股 CLI
+│   │   └── run_screener_backtest.py  # 選股策略回測
 │   └── tests/             # 測試文件
 ├── web/                   # Web 服務
 │   ├── bot/               # Line Bot 處理器

@@ -1,12 +1,14 @@
 """
 Market Data Adapter for the US Stock Trading System.
 
-This module provides functions to fetch market data from various sources,
-primarily using yfinance for historical OHLCV data and fundamental data.
+This module provides functions to fetch market data from various sources:
+- yfinance for historical OHLCV data and fundamental data
+- fredapi for macroeconomic data (optional)
+- pytrends for Google Trends data (future enhancement)
 
 Author: Quant System
 Created: 2025-12-31
-Updated: 2026-01-31 - Added fundamental data (PE/PB) and database integration
+Updated: 2026-02-09 - Enhanced for pure local simulation
 """
 
 from typing import List, Optional
@@ -224,7 +226,10 @@ def fetch_multiple(
 
 def get_latest_price(symbol: str) -> Optional[float]:
     """
-    Get the latest closing price for a symbol.
+    Get the latest closing price for a symbol using yfinance.
+    
+    This function fetches the most recent 1-minute data and returns
+    the latest close price. Falls back to daily data if intraday fails.
     
     Args:
         symbol: Stock ticker symbol.
@@ -233,7 +238,79 @@ def get_latest_price(symbol: str) -> Optional[float]:
         Latest closing price, or None if unavailable.
     """
     try:
-        df = fetch_data(symbol, period="1d", interval="1m")
-        return float(df["Close"].iloc[-1])
-    except (ValueError, IndexError):
+        # Try to get latest 1-minute data
+        ticker = yf.Ticker(symbol)
+        df = ticker.history(period="1d", interval="1m")
+        
+        if not df.empty:
+            price = float(df["Close"].iloc[-1])
+            print(f"📊 {symbol} 最新價格: ${price:.2f}")
+            return price
+            
+    except Exception as e:
+        print(f"⚠️  獲取 {symbol} 1分鐘數據失敗: {e}, 嘗試日線數據")
+    
+    try:
+        # Fallback: Get daily data
+        df = fetch_data(symbol, period="5d", interval="1d")
+        if not df.empty:
+            price = float(df["Close"].iloc[-1])
+            print(f"📊 {symbol} 最新價格 (日線): ${price:.2f}")
+            return price
+    except Exception as e:
+        print(f"❌ 獲取 {symbol} 價格失敗: {e}")
+    
+    return None
+
+
+def fetch_current_price(symbol: str) -> Optional[float]:
+    """
+    Alias for get_latest_price for backward compatibility.
+    
+    Args:
+        symbol: Stock ticker symbol.
+        
+    Returns:
+        Latest closing price, or None if unavailable.
+    """
+    return get_latest_price(symbol)
+
+
+def fetch_macro_data(indicator: str = "GDP") -> Optional[pd.Series]:
+    """
+    獲取宏觀經濟數據 (FRED API).
+    
+    需要在 .env 中設置 FRED_API_KEY.
+    
+    Args:
+        indicator: FRED 指標代碼 (例如: 'GDP', 'UNRATE', 'DFF')
+        
+    Returns:
+        時間序列數據，如果失敗則返回 None
+        
+    Example:
+        >>> gdp = fetch_macro_data('GDP')
+        >>> unemployment = fetch_macro_data('UNRATE')
+    """
+    try:
+        from fredapi import Fred
+        import os
+        
+        api_key = os.getenv('FRED_API_KEY')
+        if not api_key:
+            print("⚠️  FRED_API_KEY 未設置，跳過宏觀數據")
+            return None
+        
+        fred = Fred(api_key=api_key)
+        data = fred.get_series(indicator)
+        
+        print(f"✅ 成功獲取 {indicator} 數據: {len(data)} 個數據點")
+        return data
+        
+    except ImportError:
+        print("⚠️  fredapi 未安裝，請運行: pip install fredapi")
         return None
+    except Exception as e:
+        print(f"❌ 獲取宏觀數據失敗 ({indicator}): {e}")
+        return None
+

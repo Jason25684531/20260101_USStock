@@ -5,14 +5,12 @@ services:
     image: mysql:8.0
     container_name: usstock_db
     restart: always
+    env_file: .env
     environment:
-      MYSQL_ROOT_PASSWORD_FILE: /run/secrets/db_root_password
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
       MYSQL_DATABASE: usstock
       MYSQL_USER: trader
-      MYSQL_PASSWORD_FILE: /run/secrets/db_password
-    secrets:
-      - db_root_password
-      - db_password
+      MYSQL_PASSWORD: ${DB_PASSWORD}
     volumes:
       - db_data:/var/lib/mysql
       - ./database/my.cnf:/etc/mysql/conf.d/my.cnf:ro
@@ -20,7 +18,7 @@ services:
     ports:
       - "3308:3306"
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p$$(cat /run/secrets/db_root_password)"]
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${DB_ROOT_PASSWORD}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -36,6 +34,7 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    env_file: .env
     environment:
       - PYTHONUNBUFFERED=1
       - DB_HOST=db
@@ -44,14 +43,10 @@ services:
       - DB_NAME=usstock
       - USE_SCHEDULER=true
       - TZ=America/New_York
-    secrets:
-      - db_root_password
-      - alpaca_key
-      - alpaca_secret
-      - line_channel_token
-      - line_user_id
+      - TRADING_MODE=simulation
     volumes:
       - ./strategies/src:/app/src
+      - ./data:/app/data
     command: ["python", "src/main.py"]
     networks:
       - usstock_network
@@ -64,18 +59,13 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    env_file: .env
     environment:
       - DB_HOST=db
       - DB_PORT=3306
       - DB_USER=root
       - DB_NAME=usstock
       - TZ=America/New_York
-    secrets:
-      - db_root_password
-      - web_password
-      - line_channel_token
-      - line_channel_secret
-      - line_user_id
     volumes:
       - ./web:/app
     ports:
@@ -89,23 +79,6 @@ services:
     networks:
       - usstock_network
 
-secrets:
-  db_root_password:
-    file: ./.secrets/db_root_password.txt
-  db_password:
-    file: ./.secrets/db_password.txt
-  alpaca_key:
-    file: ./.secrets/alpaca_key.txt
-  alpaca_secret:
-    file: ./.secrets/alpaca_secret.txt
-  web_password:
-    file: ./.secrets/web_password.txt
-  line_channel_token:
-    file: ./.secrets/line_channel_token.txt
-  line_channel_secret:
-    file: ./.secrets/line_channel_secret.txt
-  line_user_id:
-    file: ./.secrets/line_user_id.txt
 
 networks:
   usstock_network:

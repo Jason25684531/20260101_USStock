@@ -151,31 +151,18 @@ def calculate_atr(
 ) -> pd.Series:
     """
     計算 Average True Range (ATR)
-    
-    ATR 是衡量市場波動性的指標，用於設置止損位
-    
+
+    委派至 config.calc_atr 統一實作。
+
     Args:
         data: 包含 High, Low, Close 的 DataFrame
         period: ATR 計算週期（默認14天）
-        
+
     Returns:
         ATR 值的 Series
     """
-    high = data['High']
-    low = data['Low']
-    close = data['Close']
-    
-    # 計算 True Range
-    tr1 = high - low
-    tr2 = abs(high - close.shift(1))
-    tr3 = abs(low - close.shift(1))
-    
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    
-    # 計算 ATR（True Range 的移動平均）
-    atr = tr.rolling(window=period).mean()
-    
-    return atr
+    from config import calc_atr
+    return calc_atr(data, period)
 
 
 def apply_atr_stop(

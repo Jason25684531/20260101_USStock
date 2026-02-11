@@ -28,26 +28,30 @@ from apscheduler.triggers.cron import CronTrigger
 from adapters.market_data import download_and_save, fetch_data
 from adapters.database import DatabaseAdapter
 from adapters.notifier import send_signal, get_notifier
-from adapters.broker import AlpacaBroker
+from adapters.broker import AlpacaBroker, MockBroker
 from strategies import run_momentum_strategy, run_value_strategy
+from config import DEFAULT_SYMBOLS
 
 
-# 交易標的列表
-SYMBOLS = ['SPY', 'QQQ', 'AAPL', 'NVDA']
+# 向後相容：傳統模式只用 4 支, screener 模式用全部
+SYMBOLS = os.getenv('SYMBOLS', 'SPY,QQQ,AAPL,NVDA').split(',')
 
 # 美東時區
 US_EASTERN = pytz.timezone('US/Eastern')
 
-# 交易模式：'backtest'（回測）, 'paper'（模擬交易）
+# 交易模式：'backtest'（回測）, 'paper'（Alpaca模擬）, 'simulation'（本地模擬）
 TRADING_MODE = os.getenv('TRADING_MODE', 'backtest').lower()
 
+# 策略類型：'traditional'（動量+價值）, 'ml'（機器學習策略）, 'screener'（每日選股推薦）
+STRATEGY_TYPE = os.getenv('STRATEGY_TYPE', 'traditional').lower()
 
-def execute_trades(broker: AlpacaBroker, target_positions: Dict[str, int], db: DatabaseAdapter):
+
+def execute_trades(broker, target_positions: Dict[str, int], db: DatabaseAdapter):
     """
     執行交易 - 計算目標倉位與實際倉位的差異並執行訂單
     
     Args:
-        broker: Alpaca Broker 適配器
+        broker: Broker 適配器 (AlpacaBroker 或 MockBroker)
         target_positions: 策略目標倉位 {symbol: target_qty}
         db: 數據庫適配器
     
@@ -96,8 +100,7 @@ def execute_trades(broker: AlpacaBroker, target_positions: Dict[str, int], db: D
                 'status': order['status']
             })
             
-            # 記錄交易到數據庫
-            # TODO: 添加 trade_logs 表的插入邏輯
+            # 記錄已由 Broker 自動完成（MockBroker._log_to_database）
             
             # 發送通知
             send_signal(
@@ -134,18 +137,20 @@ def job():
     print(f"# 美股交易策略引擎 - 自動執行")
     print(f"# 執行時間: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"# 交易模式: {TRADING_MODE.upper()}")
+    print(f"# 策略類型: {STRATEGY_TYPE.upper()}")
     print(f"{'#'*60}\n")
     
     notifier = get_notifier()
     signals_generated = []
     broker = None
     
-    # 初始化 Broker (僅在 paper/live 模式)
+    # 初始化 Broker
     if TRADING_MODE == 'paper':
+        # Alpaca Paper Trading
         try:
             broker = AlpacaBroker(use_paper=True)
             account = broker.get_account()
-            print(f"💰 帳戶資訊:")
+            print(f"💰 Alpaca 帳戶資訊:")
             print(f"   現金: ${account['cash']:,.2f}")
             print(f"   購買力: ${account['buying_power']:,.2f}")
             print(f"   總權益: ${account['equity']:,.2f}\n")
@@ -154,9 +159,24 @@ def job():
             print(f"❌ {error_msg}")
             notifier.send_error_alert("Broker 連接失敗", error_msg)
             return
+    
+    elif TRADING_MODE == 'simulation':
+        # 本地模擬交易（使用 MockBroker）
+        try:
+            broker = MockBroker()
+            account = broker.get_account()
+            print(f"💰 模擬帳戶資訊:")
+            print(f"   現金: ${account['cash']:,.2f}")
+            print(f"   購買力: ${account['buying_power']:,.2f}\n")
+        except Exception as e:
+            error_msg = f"Mock Broker 初始化失敗: {e}"
+            print(f"❌ {error_msg}")
+            notifier.send_error_alert("Mock Broker 失敗", error_msg)
+            return
+    
     elif TRADING_MODE != 'backtest':
-        print(f"⚠️  不支持的交易模式: {TRADING_MODE}，使用 backtest 模式")
-        TRADING_MODE = 'backtest'
+        print(f"⚠️  不支持的交易模式: {TRADING_MODE}，將使用 backtest 模式")
+        # Note: TRADING_MODE 是全局常量，此處不修改
     
     try:
         # 步驟 1: 下載並保存市場數據
@@ -173,58 +193,154 @@ def job():
             notifier.send_error_alert("數據下載失敗", error_msg)
             return
         
-        # 步驟 2: 執行動量策略
-        print("\n【步驟 2/4】 執行動量策略")
+        # 步驟 2: 執行策略
         db = DatabaseAdapter()
         momentum_results = {}
         target_positions = {}  # 策略目標倉位
         
-        for symbol in download_results['success']:
+        if STRATEGY_TYPE == 'screener':
+            # === 每日選股推薦模式 ===
+            print("\n【步驟 2/4】 執行每日選股推薦")
+            from screener.engine import DailyScreener
+
             try:
-                data = db.get_market_data(symbol)
-                
-                if data.empty:
-                    print(f"⚠️  {symbol}: 數據庫中無數據，跳過")
-                    continue
-                
-                portfolio = run_momentum_strategy(data, lookback_period=200)
-                
-                # 檢查是否有新信號並計算目標倉位
-                if hasattr(portfolio, 'trades') and portfolio.trades.count() > 0:
-                    last_trade = portfolio.trades.records_readable.iloc[-1]
-                    if last_trade['Exit Timestamp'] is None:  # 持倉中
-                        # 簡單策略：有信號則持有 10 股，無信號則 0 股
-                        target_positions[symbol] = 10
-                        
-                        signals_generated.append({
-                            'symbol': symbol,
-                            'action': 'BUY',
-                            'price': float(data['Close'].iloc[-1]),
-                            'strategy': 'Momentum'
-                        })
-                    else:
-                        target_positions[symbol] = 0
-                else:
-                    target_positions[symbol] = 0
-                
-                run_id = db.save_backtest_run(
-                    portfolio,
-                    strategy_name=f'Momentum-{symbol}',
-                    start_date=str(data.index[0].date()),
-                    end_date=str(data.index[-1].date())
+                screener = DailyScreener(
+                    symbols=DEFAULT_SYMBOLS,
+                    use_ml=False,
+                    top_n=int(os.getenv('SCREENER_TOP_N', '5')),
+                )
+                df_scan = screener.scan_all()
+                recommendations = screener.get_top_recommendations(df_scan)
+
+                # 存入 DB
+                screener.save_to_db(recommendations)
+
+                # 發送通知
+                if notifier.is_enabled:
+                    msg = screener.format_line_message(recommendations)
+                    notifier.send_text(msg)
+
+                for rec in recommendations:
+                    signals_generated.append({
+                        'symbol': rec['symbol'],
+                        'action': rec['signal'],
+                        'price': rec['current_price'],
+                        'strategy': 'Screener',
+                        'confidence': rec['total_score'] / 5.0,
+                    })
+
+                screener.close()
+
+            except Exception as e:
+                print(f"❌ 選股推薦執行失敗: {str(e)}")
+                import traceback
+                traceback.print_exc()
+
+        elif STRATEGY_TYPE == 'ml':
+            # === ML 策略模式 ===
+            print("\n【步驟 2/4】 執行 ML 策略")
+            from strategies.ml_strategy import MLStrategy
+            
+            try:
+                ml_strategy = MLStrategy()
+                df_signals = ml_strategy.scan_multiple_symbols(
+                    list(download_results['success'])
                 )
                 
-                momentum_results[symbol] = run_id
-                print(f"✅ {symbol}: 動量策略結果已保存 (run_id={run_id})")
+                # === Top-N Confidence Ranking ===
+                # 只對信心度最高的前 5 檔 BUY 信號下單
+                TOP_N = int(os.getenv('ML_TOP_N', '5'))
+                buy_signals = df_signals[df_signals['signal'] == 'BUY'].copy()
+                if len(buy_signals) > TOP_N:
+                    buy_signals = buy_signals.nlargest(TOP_N, 'confidence')
+                    print(f"   🏆 Top-{TOP_N} Confidence 篩選: "
+                          f"{len(df_signals[df_signals['signal']=='BUY'])} → {len(buy_signals)} 檔")
+                
+                # 合併 SELL（全部保留）+ 篩選後的 BUY
+                sell_signals = df_signals[df_signals['signal'] == 'SELL']
+                selected_signals = pd.concat([buy_signals, sell_signals], ignore_index=True)
+                
+                for _, row in selected_signals.iterrows():
+                    if row['signal'] == 'BUY':
+                        target_positions[row['symbol']] = 10
+                        signals_generated.append({
+                            'symbol': row['symbol'],
+                            'action': 'BUY',
+                            'price': row['price'],
+                            'strategy': 'ML',
+                            'confidence': row['confidence']
+                        })
+                        print(f"   [ML Strategy] Signal: BUY {row['symbol']} "
+                              f"Confidence: {row['confidence']:.2f}")
+                    elif row['signal'] == 'SELL':
+                        target_positions[row['symbol']] = 0
+                        signals_generated.append({
+                            'symbol': row['symbol'],
+                            'action': 'SELL',
+                            'price': row['price'],
+                            'strategy': 'ML',
+                            'confidence': row['confidence']
+                        })
+                        print(f"   [ML Strategy] Signal: SELL {row['symbol']} "
+                              f"Confidence: {row['confidence']:.2f}")
+                
+                ml_strategy.close()
                 
             except Exception as e:
-                print(f"❌ {symbol}: 動量策略執行失敗 - {str(e)}")
+                print(f"❌ ML 策略執行失敗: {str(e)}")
+                import traceback
+                traceback.print_exc()
         
-        # 步驟 3: 執行價值策略 (僅在回測模式)
-        print(f"\n【步驟 3/4】 {'執行價值策略' if TRADING_MODE == 'backtest' else '跳過價值策略 (Paper Trading 模式)'}")
+        else:
+            # === 傳統策略模式 ===
+            print("\n【步驟 2/4】 執行動量策略")
+        
+            for symbol in download_results['success']:
+                try:
+                    data = db.get_market_data(symbol)
+                    
+                    if data.empty:
+                        print(f"⚠️  {symbol}: 數據庫中無數據，跳過")
+                        continue
+                    
+                    portfolio = run_momentum_strategy(data, lookback_period=200)
+                    
+                    # 檢查是否有新信號並計算目標倉位
+                    if hasattr(portfolio, 'trades') and portfolio.trades.count() > 0:
+                        last_trade = portfolio.trades.records_readable.iloc[-1]
+                        if last_trade['Exit Timestamp'] is None:  # 持倉中
+                            # 簡單策略：有信號則持有 10 股，無信號則 0 股
+                            target_positions[symbol] = 10
+                            
+                            signals_generated.append({
+                                'symbol': symbol,
+                                'action': 'BUY',
+                                'price': float(data['Close'].iloc[-1]),
+                                'strategy': 'Momentum'
+                            })
+                        else:
+                            target_positions[symbol] = 0
+                    else:
+                        target_positions[symbol] = 0
+                    
+                    run_id = db.save_backtest_run(
+                        portfolio,
+                        strategy_name=f'Momentum-{symbol}',
+                        start_date=str(data.index[0].date()),
+                        end_date=str(data.index[-1].date())
+                    )
+                    
+                    momentum_results[symbol] = run_id
+                    print(f"✅ {symbol}: 動量策略結果已保存 (run_id={run_id})")
+                    
+                except Exception as e:
+                    print(f"❌ {symbol}: 動量策略執行失敗 - {str(e)}")
+        
+        # 步驟 3: 執行價值策略 (僅在回測模式且傳統策略)
         value_results = {}
         
-        if TRADING_MODE == 'backtest':
+        if TRADING_MODE == 'backtest' and STRATEGY_TYPE == 'traditional':
+            print(f"\n【步驟 3/4】 執行價值策略")
             for symbol in download_results['success']:
                 try:
                     data = db.get_market_data(symbol)
@@ -246,8 +362,10 @@ def job():
                     
                 except Exception as e:
                     print(f"❌ {symbol}: 價值策略執行失敗 - {str(e)}")
+        else:
+            print(f"\n【步驟 3/4】 跳過價值策略 (ML/Paper Trading 模式)")
         
-        # 步驟 4: 執行交易 (僅在 paper 模式)
+        # 步驟 4: 執行交易 (僅在 paper/simulation 模式)
         executed_trades = []
         if TRADING_MODE == 'paper' and broker:
             print(f"\n【步驟 4/4】 執行實際交易")

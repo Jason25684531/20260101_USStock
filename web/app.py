@@ -223,6 +223,169 @@ def health():
 
 
 # ============================================
+# ML Model Status API
+# ============================================
+@app.route('/api/ml_status')
+@auth.login_required
+def get_ml_status():
+    """
+    獲取 ML 模型狀態：最近交易的置信度和 top_features
+
+    Returns:
+        JSON 對象：
+        {
+            "model_loaded": true,
+            "feature_importance": [...],     # 來自模型文件（如果可用）
+            "recent_signals": [...]          # 最近 20 筆 trade_logs 帶 confidence
+        }
+    """
+    import json as _json
+
+    result = {
+        'model_loaded': False,
+        'feature_importance': [],
+        'recent_signals': [],
+    }
+
+    # 1. 嘗試讀取模型的 feature importance（從 model.pkl）
+    try:
+        import pickle
+        from pathlib import Path
+
+        model_path = Path('/app/data/model.pkl')
+        # 也嘗試本機開發路徑
+        if not model_path.exists():
+            model_path = Path(__file__).parent.parent / 'data' / 'model.pkl'
+
+        if model_path.exists():
+            with open(model_path, 'rb') as f:
+                model_data = pickle.load(f)
+            fi = model_data.get('feature_importance')
+            if fi is not None and hasattr(fi, 'head'):
+                top = fi.head(10)
+                result['feature_importance'] = [
+                    {'feature': row['feature'], 'importance': round(float(row['importance']), 4)}
+                    for _, row in top.iterrows()
+                ]
+            result['model_loaded'] = True
+    except Exception:
+        pass  # 模型不存在也不影響 API
+
+    # 2. 從 trade_logs 拉最近帶 confidence 的交易信號
+    try:
+        with engine.connect() as conn:
+            query = text("""
+                SELECT
+                    symbol,
+                    entry_date,
+                    entry_price,
+                    confidence,
+                    top_features
+                FROM trade_logs
+                WHERE confidence IS NOT NULL
+                ORDER BY entry_date DESC, id DESC
+                LIMIT 20
+            """)
+            rows = conn.execute(query)
+            for row in rows:
+                sig = {
+                    'symbol': row[0],
+                    'entry_date': str(row[1]) if row[1] else None,
+                    'entry_price': float(row[2]) if row[2] else 0,
+                    'confidence': float(row[3]) if row[3] else None,
+                    'top_features': _json.loads(row[4]) if row[4] else None,
+                }
+                result['recent_signals'].append(sig)
+    except Exception as e:
+        result['db_error'] = str(e)
+
+    return jsonify(result)
+
+
+# ============================================
+# 每日選股推薦 API
+# ============================================
+@app.route('/api/recommendations')
+@auth.login_required
+def get_recommendations():
+    """
+    獲取最新一日的選股推薦結果
+
+    Query params:
+        date: 指定日期 (YYYY-MM-DD), 預設最新
+        limit: 筆數 (預設 10)
+
+    Returns:
+        JSON 列表: [{rank, symbol, signal, total_score, current_price, ...}]
+    """
+    from flask import request as flask_request
+
+    req_date = flask_request.args.get('date')
+    limit = flask_request.args.get('limit', 10, type=int)
+
+    try:
+        with engine.connect() as conn:
+            if req_date:
+                date_filter = "scan_date = :target_date"
+                params = {'target_date': req_date, 'limit': limit}
+            else:
+                # 取最新日期
+                latest = conn.execute(text(
+                    "SELECT MAX(scan_date) FROM daily_recommendations"
+                )).scalar()
+                if not latest:
+                    return jsonify([])
+                date_filter = "scan_date = :target_date"
+                params = {'target_date': str(latest), 'limit': limit}
+
+            query = text(f"""
+                SELECT
+                    scan_date, symbol, rank_position, signal_type, total_score,
+                    breakout_pass, acceleration_pass, peg_pass, dupont_pass,
+                    ml_confidence, current_price,
+                    support_1, support_2, resistance_1, resistance_2,
+                    pe_ratio, peg_ratio, pb_ratio, roe,
+                    strategy_details, created_at
+                FROM daily_recommendations
+                WHERE {date_filter}
+                ORDER BY rank_position ASC
+                LIMIT :limit
+            """)
+
+            result = conn.execute(query, params)
+            recs = []
+            for row in result:
+                recs.append({
+                    'scan_date': str(row[0]),
+                    'symbol': row[1],
+                    'rank': row[2],
+                    'signal': row[3],
+                    'total_score': float(row[4]) if row[4] else 0,
+                    'breakout_pass': bool(row[5]),
+                    'acceleration_pass': bool(row[6]),
+                    'peg_pass': bool(row[7]),
+                    'dupont_pass': bool(row[8]),
+                    'ml_confidence': float(row[9]) if row[9] else None,
+                    'current_price': float(row[10]) if row[10] else 0,
+                    'support_1': float(row[11]) if row[11] else None,
+                    'support_2': float(row[12]) if row[12] else None,
+                    'resistance_1': float(row[13]) if row[13] else None,
+                    'resistance_2': float(row[14]) if row[14] else None,
+                    'pe_ratio': float(row[15]) if row[15] else None,
+                    'peg_ratio': float(row[16]) if row[16] else None,
+                    'pb_ratio': float(row[17]) if row[17] else None,
+                    'roe': float(row[18]) if row[18] else None,
+                    'strategy_details': row[19],
+                    'created_at': row[20].strftime('%Y-%m-%d %H:%M:%S') if row[20] else None,
+                })
+
+            return jsonify(recs)
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+# ============================================
 # Line Bot 通知 API（供策略引擎調用）
 # ============================================
 @app.route('/api/notify/signal', methods=['POST'])
