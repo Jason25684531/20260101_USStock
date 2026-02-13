@@ -294,7 +294,6 @@ def main():
     ingestion = DataIngestion()
     
     # 定義目標股票列表（由 config.DEFAULT_SYMBOLS 統一管理）
-    sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
     from config import DEFAULT_SYMBOLS
     default_list = ','.join(DEFAULT_SYMBOLS)
     symbols = os.getenv('SYMBOLS', default_list).split(',')

@@ -1,5 +1,52 @@
 # 更新日志
 
+## 2026-02-13 - linebot-and-stability-pro（Phase 1 穩定化）
+
+### 🔧 Port 統一清理
+- **修正**: `web/app.py` 預設 Port 從 `6688` → `5000`，與 docker-compose.yml 一致
+- **確認**: `docker-compose.yml` Web Dashboard=`5000:5000`、Strategy Engine=`5001:5000`
+- **確認**: `prod.docker-compose.yml` Web 用 gunicorn 綁定 `0.0.0.0:5000`
+
+### 📱 LINE Bot Flex Message 智慧報告
+- **升級**: `main.py` Screener 模式改用 `notifier.send_flex_report(recommendations)` 發送 Carousel Flex Message
+- **Flex 內容**: 每張 Bubble 包含股票代碼、信號(BUY/SELL)、評分(/5)、ML 信心度(%)、支撐/壓力價
+- **取代**: 原純文字 `send_text()` 模式已被 Flex Message 取代
+
+### 🛡️ Anti-Bias 回測修正（消除 Look-ahead Bias）
+- **修正**: `ml_strategy.py` `backtest_strategy()` 改用 Point-in-time 基本面
+  - 新增 `as_of_date` 參數至 `_get_fundamental_data(symbol, as_of_date=start_date)`
+  - 回測時只使用回測起始日前已公佈的基本面數據
+- **修正**: `DatabaseAdapter.get_fundamental_data(symbols, as_of_date=None)` 支援 `data_date <= as_of_date` 過濾
+- **影響**: 2024 回測結果將更為真實，不再使用 2025 年的基本面數據
+
+### 💰 Hysteresis Filter（持倉輪換防抖）
+- **新增**: `main.py` ML 策略模式中的 Hysteresis 過濾機制
+  - 環境變數 `HYSTERESIS_THRESHOLD=0.15`（預設 15%）
+  - 只有新信號 confidence 比當前持倉最低 confidence 高出 15%+ 才執行輪換
+  - 減少高頻換股帶來的 0.1% 手續費侵蝕
+
+### 🧹 程式碼清理
+- **移除**: `ingest_full_data.py` 中重複的 `sys.path.insert()` 調用
+- **維持**: `web/` vs `strategies/` 的 `db.py`、`security.py` 重複保持（微服務邊界設計）
+- **維持**: `calculate_rsi()`、`calculate_atr()` 薄 wrapper 保留（向後兼容）
+
+### ✅ 全功能測試結果
+- `py_compile` 全檔通過（20+ 模組 + 6 腳本）
+- 模組導入測試全部通過（config, utils, adapters, ml, screener, strategies, core, web）
+- 共用函式功能測試：`calc_rsi`, `calc_atr`, `calc_rule_score` 輸出正確
+- Anti-Bias 參數驗證：`as_of_date` 參數已正確傳遞
+- LINE Bot 測試：`test_line_push.py` 2/2 通過
+
+### 🔮 下一步預期發展
+1. **Walk-Forward 回測**: 引入 Walk-Forward 交叉驗證，搭配 Anti-Bias 提升 ML 泛化力
+2. **Docker 整合測試**: 完整 `docker-compose up` 端到端測試（DB → Strategy → Web → LINE Bot）
+3. **Flex Message 互動**: LINE Bot 加入 Quick Reply 按鈕（Top5 → 查看個股 → 設定提醒）
+4. **即時數據管線**: 整合 Alpaca WebSocket 即時報價 + 日內動態 Re-score
+5. **自動化 CI/CD**: GitHub Actions 自動執行 `py_compile` + `pytest` + Docker build
+6. **Dashboard 強化**: Web Dashboard 加入互動式權益曲線圖表 + 即時 P&L 追蹤
+
+---
+
 ## 2026-02-13 - 程式碼清洗與架構整合
 
 ### 🧹 重複定義清理

@@ -215,10 +215,9 @@ def job():
                 # 存入 DB
                 screener.save_to_db(recommendations)
 
-                # 發送通知
+                # 發送 Flex Message 推薦報告
                 if notifier.is_enabled:
-                    msg = screener.format_line_message(recommendations)
-                    notifier.send_text(msg)
+                    notifier.send_flex_report(recommendations)
 
                 for rec in recommendations:
                     signals_generated.append({
@@ -255,6 +254,38 @@ def job():
                     buy_signals = buy_signals.nlargest(TOP_N, 'confidence')
                     print(f"   🏆 Top-{TOP_N} Confidence 篩選: "
                           f"{len(df_signals[df_signals['signal']=='BUY'])} → {len(buy_signals)} 檔")
+                
+                # === Hysteresis Filter ===
+                # 只有新信號 confidence 比既有持倉信號高出 15% 以上才輪換
+                # 減少手續費侵蝕 (0.1% per trade)
+                HYSTERESIS_THRESHOLD = float(os.getenv('HYSTERESIS_THRESHOLD', '0.15'))
+                if broker:
+                    current_positions = broker.get_positions()
+                    if current_positions:
+                        kept_symbols = set()
+                        new_buy_list = []
+                        for _, row in buy_signals.iterrows():
+                            sym = row['symbol']
+                            conf = row['confidence']
+                            if sym in current_positions:
+                                # 已持有 → 直接保留，無需輪換
+                                kept_symbols.add(sym)
+                                new_buy_list.append(row)
+                            else:
+                                # 新標的 → 檢查是否 confidence 足夠高
+                                # 比較對象：current Top-N 中 confidence 最低者
+                                min_held_conf = 0.0
+                                for prev_sig in signals_generated:
+                                    if prev_sig.get('strategy') == 'ML' and prev_sig['action'] == 'BUY':
+                                        if prev_sig['symbol'] in current_positions:
+                                            min_held_conf = max(min_held_conf, prev_sig.get('confidence', 0))
+                                if min_held_conf == 0 or conf >= min_held_conf + HYSTERESIS_THRESHOLD:
+                                    new_buy_list.append(row)
+                                else:
+                                    print(f"   🔒 Hysteresis: {sym} confidence={conf:.2f} "
+                                          f"< 持倉最低 {min_held_conf:.2f}+{HYSTERESIS_THRESHOLD}, 不輪換")
+                        if new_buy_list:
+                            buy_signals = pd.DataFrame(new_buy_list)
                 
                 # 合併 SELL（全部保留）+ 篩選後的 BUY
                 sell_signals = df_signals[df_signals['signal'] == 'SELL']

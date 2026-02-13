@@ -210,12 +210,19 @@ class MLStrategy:
             print(f"   ⚠️  獲取宏觀數據失敗: {str(e)}")
             return pd.DataFrame()
     
-    def _get_fundamental_data(self, symbol: str) -> pd.DataFrame:
-        """從數據庫獲取基本面數據（委派至 DatabaseAdapter）"""
+    def _get_fundamental_data(self, symbol: str, as_of_date: str = None) -> pd.DataFrame:
+        """從數據庫獲取基本面數據（委派至 DatabaseAdapter）
+        
+        Args:
+            symbol: 股票代碼
+            as_of_date: Point-in-time 日期上限 (YYYY-MM-DD)
+                回測時使用，只取該日期之前已存在的數據，避免前瞻偏差。
+        """
         try:
-            df = self.db.get_fundamental_data(symbol)
+            df = self.db.get_fundamental_data(symbol, as_of_date=as_of_date)
             if not df.empty:
-                print(f"   ✅ 獲取基本面數據: {len(df)} 條記錄")
+                tag = f" (as_of={as_of_date})" if as_of_date else ""
+                print(f"   ✅ 獲取基本面數據: {len(df)} 條記錄{tag}")
             else:
                 print(f"   ⚠️  無基本面數據")
             return df
@@ -290,28 +297,23 @@ class MLStrategy:
         end_date: str
     ) -> pd.DataFrame:
         """
-        回測策略（簡化版本）
+        回測策略（Anti-Bias 版本）
         
-        Args:
-            symbol: 股票代碼
-            start_date: 開始日期
-            end_date: 結束日期
-            
-        Returns:
-            包含信號和實際收益的 DataFrame
+        使用 Point-in-time 基本面資料：只看 start_date 之前已公佈的
+        數據，避免前瞻偏差 (Look-ahead Bias)。
         """
         print(f"\n📈 回測 {symbol}: {start_date} 到 {end_date}")
+        print(f"   🛡️ Anti-Bias: 基本面資料截至 {start_date}（Point-in-time）")
         
-        # 獲取數據（需要更長的回看期來計算指標）
         from datetime import datetime, timedelta
         start_dt = datetime.strptime(start_date, '%Y-%m-%d')
         extended_start = (start_dt - timedelta(days=365)).strftime('%Y-%m-%d')
         
-        df_price = self._get_price_data(symbol, 365 * 3)  # 3年數據
+        df_price = self._get_price_data(symbol, 365 * 3)
         df_macro = self._get_macro_data()
-        df_fundamental = self._get_fundamental_data(symbol)
+        # Point-in-time: 只取回測開始日期前的基本面，防止前瞻偏差
+        df_fundamental = self._get_fundamental_data(symbol, as_of_date=start_date)
         
-        # 生成特徵（包含基本面數據）
         df_features = make_features(df_price, df_macro, df_fundamental)
         
         # 過濾日期範圍

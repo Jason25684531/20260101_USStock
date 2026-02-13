@@ -354,12 +354,14 @@ class DatabaseAdapter:
     # 共用查詢：基本面數據
     # ----------------------------------------------------------
 
-    def get_fundamental_data(self, symbols) -> pd.DataFrame:
+    def get_fundamental_data(self, symbols, as_of_date: str = None) -> pd.DataFrame:
         """
         從 stock_fundamentals 表取得基本面數據。
 
         Args:
             symbols: 單一字串或 list
+            as_of_date: Point-in-time 日期上限 (YYYY-MM-DD)
+                僅回傳 data_date <= as_of_date 的記錄，用於回測防止前瞻偏差。
 
         Returns:
             DataFrame (index=data_date)
@@ -369,6 +371,11 @@ class DatabaseAdapter:
 
         placeholders = ', '.join([f":s{i}" for i in range(len(symbols))])
         params = {f"s{i}": s for i, s in enumerate(symbols)}
+
+        where_clause = f"WHERE symbol IN ({placeholders})"
+        if as_of_date:
+            where_clause += " AND data_date <= :as_of_date"
+            params['as_of_date'] = as_of_date
 
         query = text(f"""
             SELECT
@@ -382,7 +389,7 @@ class DatabaseAdapter:
                 inst_ownership_pct,
                 market_cap
             FROM stock_fundamentals
-            WHERE symbol IN ({placeholders})
+            {where_clause}
             ORDER BY data_date
         """)
 

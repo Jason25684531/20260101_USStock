@@ -68,13 +68,13 @@ services:
       - DB_USER=root
       - DB_NAME=usstock
       - TZ=America/New_York
-      - WEB_PORT=5000
+      - WEB_PORT=6688
     volumes:
       - ./web:/app
     ports:
-      - "5000:5000"
+      - "6688:6688"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:6688/health"]
       interval: 30s
       timeout: 10s
       retries: 3

@@ -82,8 +82,10 @@
 - **Rel_Strength_SPY**: 63 日相對強度 (個股 vs SPY)
 - **Volume_Price_Trend**: 10 日價量相關性
 - **Top-N 信心度排名**: 僅保留 Top 5 最高信心 BUY 信號 (`ML_TOP_N` 可配置)
+- **Hysteresis Filter**: 持倉輪換防抖 — 新信號需高出 15% confidence 才替換 (`HYSTERESIS_THRESHOLD` 可配置)
 - **流動性過濾**: 20 日平均日交易額 < $5M 自動排除
 - **交易成本模擬**: MockBroker 0.1% 手續費扣除（含滑點）
+- **Anti-Bias 回測**: `backtest_strategy()` 使用 Point-in-time 基本面，防止前瞻偏差
 
 詳細說明請參閱 [Paper Trading 指南](doc/PAPER_TRADING_GUIDE.md) 和 [ML 平台指南](doc/ML_PLATFORM_GUIDE.md)。
 
@@ -144,8 +146,8 @@ docker-compose -f prod.docker-compose.yml up -d
 
 ### 4. 驗證服務
 
-- **Web Dashboard**: http://localhost:5000
-- **健康檢查**: http://localhost:5000/health
+- **Web Dashboard**: http://localhost:6688
+- **健康檢查**: http://localhost:6688/health
 
 ## 📱 Line Bot 設置
 
@@ -477,11 +479,11 @@ python -c "from utils.security import get_secret; print('security OK')"
 python -c "from utils.db import get_db_config, get_engine; print('db OK')"
 python -c "from adapters.database import DatabaseAdapter; print('DatabaseAdapter OK')"
 python -c "from adapters.market_data import fetch_data, fetch_multiple, get_latest_price; print('market_data OK')"
-python -c "from ml.features import build_features; print('features OK')"
+python -c "from ml.features import make_features, get_feature_columns; print('features OK')"
 python -c "from ml.model import StrategyModel; print('model OK')"
-python -c "from screener.engine import DailyScreenerEngine; print('screener OK')"
-python -c "from strategies import MomentumStrategy; print('strategies OK')"
-python -c "from core.backtest import run_backtest; print('backtest OK')"
+python -c "from screener.engine import DailyScreener; print('screener OK')"
+python -c "from strategies.momentum import run_momentum_strategy; print('momentum OK')"
+python -c "from core.backtest import run_sma_strategy, calculate_atr; print('backtest OK')"
 cd ../..
 
 # Web 模組（需在 web/ 目錄下執行）
@@ -499,18 +501,36 @@ cd strategies/src
 python -c "
 import pandas as pd, numpy as np
 from config import calc_rsi, calc_atr, calc_rule_score
-s = pd.Series(np.random.uniform(100, 200, 50))
-print(f'RSI: {calc_rsi(s).iloc[-1]:.2f}')
-h = pd.Series(np.random.uniform(150, 200, 50))
-l = pd.Series(np.random.uniform(100, 150, 50))
-print(f'ATR: {calc_atr(h, l, s).iloc[-1]:.2f}')
-score = calc_rule_score({'Breakout': True, 'Acceleration': True, 'PEG': False, 'DuPont': True}, {})
+prices = pd.Series([100+i*0.5 for i in range(30)])
+print(f'RSI: {calc_rsi(prices).iloc[-1]:.2f}')
+df = pd.DataFrame({'High': prices+2, 'Low': prices-2, 'Close': prices})
+print(f'ATR: {calc_atr(df).iloc[-1]:.4f}')
+score = calc_rule_score(
+  {'pass':True,'score':1},{'pass':False,'score':0.6},
+  {'pass':True,'score':1},{'pass':False,'score':0.3})
 print(f'Rule Score: {score}')
 print('ALL TESTS PASSED')
 "
 cd ../..
 
+# Anti-Bias 參數驗證
+cd strategies/src
+python -c "
+from adapters.database import DatabaseAdapter
+import inspect
+sig = inspect.signature(DatabaseAdapter.get_fundamental_data)
+assert 'as_of_date' in sig.parameters
+print('Anti-Bias: as_of_date parameter OK')
+from strategies.ml_strategy import MLStrategy
+sig2 = inspect.signature(MLStrategy._get_fundamental_data)
+assert 'as_of_date' in sig2.parameters
+print('MLStrategy: as_of_date parameter OK')
+print('ALL ANTI-BIAS TESTS PASSED')
+"
+cd ../..
+
 # LINE Bot 測試
+$env:PYTHONIOENCODING='utf-8'
 python strategies/tests/test_line_push.py
 ```
 
@@ -573,7 +593,7 @@ docker-compose -f prod.docker-compose.yml logs -f
 
 | 服務 | 開發端口 | 生產端口 | 說明 |
 |------|---------|---------|------|
-| Web Dashboard | 5000 | 5000 | Flask 應用 + LINE Webhook |
+| Web Dashboard | 6688 | 6688 | Flask 應用 + LINE Webhook |
 | Strategy Engine | 5001 | — | 策略引擎 API (內部) |
 | MySQL | 3308 | — (不暴露) | 資料庫 |
 
@@ -581,12 +601,12 @@ docker-compose -f prod.docker-compose.yml logs -f
 
 ```bash
 # Web Dashboard
-curl http://localhost:5000/health
+curl http://localhost:6688/health
 
 # API 端點
-curl http://localhost:5000/api/strategies
-curl http://localhost:5000/api/ml_status
-curl http://localhost:5000/api/recommendations
+curl http://localhost:6688/api/strategies
+curl http://localhost:6688/api/ml_status
+curl http://localhost:6688/api/recommendations
 ```
 
 ## 📝 更新日誌
