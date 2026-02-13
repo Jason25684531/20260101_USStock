@@ -59,73 +59,26 @@ def load_data_from_db(
     df_price = pd.concat(all_price_data, axis=0)
     print(f"\n   ✅ 總計加載 {len(df_price)} 條價格記錄")
     
-    # 加載宏觀數據
-    from sqlalchemy import text
-    
+    # 加載宏觀數據（使用 DatabaseAdapter 共用方法）
     try:
-        query = text("""
-            SELECT 
-                date,
-                MAX(CASE WHEN ticker = 'UNRATE' THEN value END) AS UNRATE,
-                MAX(CASE WHEN ticker = 'GDP' THEN value END) AS GDP,
-                MAX(CASE WHEN ticker = 'DFF' THEN value END) AS DFF,
-                MAX(CASE WHEN ticker = 'CPIAUCSL' THEN value END) AS CPIAUCSL,
-                MAX(CASE WHEN ticker = 'T10Y2Y' THEN value END) AS T10Y2Y
-            FROM macro_data
-            GROUP BY date
-            ORDER BY date
-        """)
-        
-        df_macro = pd.read_sql(query, db.engine)
-        
+        df_macro = db.get_macro_data()
         if not df_macro.empty:
-            df_macro.set_index('date', inplace=True)
-            df_macro.index = pd.to_datetime(df_macro.index)
             print(f"   ✅ 加載 {len(df_macro)} 條宏觀數據記錄")
         else:
             print(f"   ⚠️  無宏觀數據，將僅使用技術指標")
-            df_macro = pd.DataFrame()
-        
     except Exception as e:
-        print(f"   ⚠️  加載宏觀數據失敗 (表可能不存在): {str(e)}")
+        print(f"   ⚠️  加載宏觀數據失敗: {str(e)}")
         df_macro = pd.DataFrame()
     
-    # 加載基本面數據
+    # 加載基本面數據（使用 DatabaseAdapter 共用方法）
     try:
-        from sqlalchemy import bindparam
-        query = text("""
-            SELECT 
-                data_date,
-                symbol,
-                peg_ratio,
-                pe_ratio,
-                pb_ratio,
-                revenue_growth_yoy AS roe,
-                revenue_growth_yoy,
-                earnings_growth_yoy,
-                inst_ownership_pct,
-                market_cap
-            FROM stock_fundamentals
-            WHERE symbol IN :symbols
-            ORDER BY data_date
-        """).bindparams(bindparam('symbols', expanding=True))
-        
-        df_fundamental = pd.read_sql(query, db.engine, params={'symbols': symbols})
-        
+        df_fundamental = db.get_fundamental_data(symbols)
         if not df_fundamental.empty:
-            # 轉換為寬格式（每個日期一行）
-            df_fundamental['data_date'] = pd.to_datetime(df_fundamental['data_date'])
-            df_fundamental.set_index('data_date', inplace=True)
-            # 移除 symbol 列（如果我們處理單個股票）
-            if 'symbol' in df_fundamental.columns:
-                df_fundamental = df_fundamental.drop(columns=['symbol'])
             print(f"   ✅ 加載 {len(df_fundamental)} 條基本面數據記錄")
         else:
             print(f"   ⚠️  無基本面數據，將僅使用技術指標")
-            df_fundamental = pd.DataFrame()
-        
     except Exception as e:
-        print(f"   ⚠️  加載基本面數據失敗 (表可能不存在): {str(e)}")
+        print(f"   ⚠️  加載基本面數據失敗: {str(e)}")
         df_fundamental = pd.DataFrame()
     
     return df_price, df_macro, df_fundamental

@@ -1,5 +1,261 @@
 # 更新日志
 
+## 2026-02-13 - 程式碼清洗與架構整合
+
+### 🧹 重複定義清理
+- **修復 Bug**: `ml_strategy.py` 引用了不存在的 `MarketDataAdapter` 類 → 改用 `fetch_data()` 函式
+- **移除冗餘**: `market_data.py` 中未使用的 `fetch_current_price()` 別名已刪除
+- **整合常量**: `train_local_model.py` 原自行定義 `TRAIN_SYMBOLS` → 改用 `config.BACKTEST_SYMBOLS`，消除重複維護
+- **清理路徑入侵**: `database.py` 中不必要的 `sys.path.insert()` 已移除，改用模組內相對導入
+
+### 📂 跨模組函式整合現況（已由 Phase 8 完成）
+| 共用函式 | 位置 | 調用方 |
+|---------|------|-------|
+| `calc_rsi()` | `config.py` | `momentum.py`, `ml/features.py` |
+| `calc_atr()` | `config.py` | `support_resistance.py`, `core/backtest.py` |
+| `calc_rule_score()` | `config.py` | `screener/engine.py`, `run_screener_backtest.py` |
+| `evaluate_stock_rules()` | `config.py` | `screener/engine.py`, `run_screener_backtest.py` |
+| `get_db_config()` | `utils/db.py` (strategy) / `db.py` (web) | `database.py`, `app.py` |
+| `get_secret()` | `utils/security.py` (strategy) / `security.py` (web) | 全系統 |
+
+### 🏗️ 架構設計備註
+- **服務隔離**: `strategies/` 和 `web/` 各自維護獨立的 `security.py` + `db.py`（微服務邊界不跨服務共用模組）
+- **Flex Message 建構器**: `notifier.py` 和 `handler.py` 各自持有 Flex 建構邏輯（承認跨服務重複，但保持解耦）
+- **委派模式**: `ml/features.calculate_rsi()` → `config.calc_rsi()`、`core/backtest.calculate_atr()` → `config.calc_atr()`
+
+### ✅ 全功能測試結果
+- `py_compile` 全檔通過（14 個核心模組 + 6 個腳本）
+- 模組導入測試全部通過（config, utils, adapters, ml, screener, strategies, core, web）
+- 共用函式功能測試：`calc_rsi`, `calc_atr`, `calc_rule_score` 輸出正確
+- LINE Bot 測試：`test_line_push.py` 2/2 通過
+
+### 🔮 下一步預期發展
+1. **自動化測試**: 建立 `pytest` 測試套件，覆蓋 config 共用函式、DB adapter、screener engine
+2. **CI/CD 流水線**: 加入 GitHub Actions 自動執行 `py_compile` + `pytest`
+3. **策略回測優化**: 引入 Walk-Forward 交叉驗證，提升 ML 模型泛化能力
+4. **即時數據**: 整合 WebSocket 即時報價（Alpaca Streaming）
+5. **Dashboard 強化**: Web Dashboard 加入互動式權益曲線圖表 + 即時 P&L 追蹤
+
+---
+
+## 2026-02-13 - ML 信心度自動啟用 & 模型 Fallback
+
+### 🤖 自動偵測 ML 模型（DailyScreener）
+- **改進**: `DailyScreener.__init__(use_ml=None)` 現在自動偵測模型文件存在
+  - 檢查 `data/model.pkl` 或 `data/test_model.pkl`（優先順序：model.pkl → test_model.pkl）
+  - 若存在，自動啟用 ML，無需 `--use-ml` 參數
+  - 好處：用戶可以直接執行 `python run_daily_screener.py --save-db` 即可獲得 ML 信心度
+
+### 📦 模型加載 Fallback（StrategyModel.load()）
+- **改進**: `StrategyModel.load()` 現在支援 Fallback
+  - 優先載入 `data/model.pkl`
+  - 若不存在，自動 fallback 到 `data/test_model.pkl`
+  - 錯誤訊息更明確，列出兩個嘗試的路徑
+
+### 🎚️ 命令行參數更新（run_daily_screener.py）
+```bash
+# 🌟 預設：自動偵測（推薦使用）
+python run_daily_screener.py --save-db --notify
+
+# ✅ 強制啟用 ML
+python run_daily_screener.py --use-ml true --save-db
+
+# ❌ 禁用 ML（純規則）
+python run_daily_screener.py --use-ml false --save-db
+```
+
+### 📊 ML 信心度顯示邏輯
+| 運行方式 | Top5 ML 欄 | 原因 |
+|---------|-----------|------|
+| `python run_daily_screener.py` | `72%` | ✅ 自動偵測到模型，ML 啟用 |
+| `--use-ml true` | `72%` | ✅ 強制啟用 |
+| `--use-ml false` | `—` | ❌ 用戶禁用 ML |
+| 無模型文件 | `—` | ❌ 自動偵測失敗，無模型 |
+
+### 💡 為什麼之前沒有 ML 信心度？
+原因：用戶執行 `python run_daily_screener.py` 時沒有加 `--use-ml` 參數，系統預設用純規則模式，ml_confidence 存為 0，線上顯示為「—」。
+
+現在改進後，如果有 model.pkl，會自動啟用，無需手動添加參數！
+
+---
+
+## 2026-02-13 - LINE Bot 策略版本切換功能
+
+### 📊 新增 Top5 基礎版命令
+- `handler.py` 新增 `_cmd_top5_basic()` 函數 — 查詢純規則推薦（無 ML 加權）
+- 命令別名支援：`Top5基礎` / `Top5-basic` / `/basic` / `基礎`
+- 計算邏輯：反推原始規則分（`rule_score = total_score / (ml_confidence / 0.5)`）
+- Flex Message 顯示：ML 信心度顯示為 `—`，評分為純規則分 (0-4)
+- 標題標記：`(純規則)` 後綴區分版本
+
+### 📚 命令說明更新
+- `/help` 新增 `Top5基礎` 說明：「純規則推薦（無 ML）」
+- `/strategies` 改為版本對比格式：
+  - Top5（完整版）— 4 規則 + ML 信心度加權
+  - Top5基礎（純規則版）— 僅 4 規則評分，無 ML
+- 歡迎訊息更新：新增 `Top5基礎` 選項
+
+### 🧪 測試更新
+- `test_line_push.py` 新增 `Top5基礎` 命令識別測試
+- `/strategies` 斷言改為檢查版本差異關鍵字
+- 全部測試通過 ✅
+
+### 📝 用戶使用方式
+
+| 命令 | 推薦版本 | 評分邏輯 | ML 顯示 |
+|------|---------|---------|--------|
+| `Top5` | 完整版 | 規則分 × (ML 信心度 / 0.5) | 顯示 % |
+| `Top5基礎` | 純規則版 | 規則分（0-4） | 顯示 — |
+
+**實際例子：**
+```
+AAPL:
+  規則分: 2.5/4 (創新高✓ + 加速度✓)
+  ML 信心度: 72%
+
+→ Top5: 評分 3.6/5 (2.5 × 1.44)
+→ Top5基礎: 評分 2.5/4 (純規則)
+```
+
+---
+
+## 2026-02-12 - Phase 9: LINE Bot Intelligence Center
+
+### 📱 LINE Bot 互動命令
+- `handler.py` 完全重寫：新增 `Top5`、`ML [symbol]`、`/status`、`/help`、`/strategies` 命令
+- `Top5` 命令：查詢 DB `daily_recommendations` 最新推薦，回傳 **Flex Carousel** 卡片式訊息
+- `ML [symbol]` 命令：查詢 `trade_logs`（含 confidence + top_features）或 `daily_recommendations`，回傳 ML 預測結果
+- 回覆改用 `reply_messages()` 統一支援 text + flex 格式
+- 新增 `_build_top5_flex()` / `_build_bubble()` / `_flex_kv()` Flex 建構函式
+
+### 📤 Flex Message 推薦報告
+- `notifier.py` 新增 `send_flex_report(recommendations)` 方法
+- 每支股票產生一張 Flex Bubble 卡片：Symbol、價格、評分、ML 信心度、策略通過、支撐壓力
+- BUY 綠色標頭 (#00C853) / SELL 紅色標頭 (#FF1744)
+- Carousel 最多 10 張卡片
+- `run_daily_screener.py --notify` 改為優先使用 Flex Report，失敗時 fallback 純文字
+- `notifier.py` 移除未使用匯入 (`os`, `Any`)
+
+### 🌐 Webhook 路由修正
+- `app.py` Blueprint 註冊改為 `register_blueprint(line_bot_bp)`（無 prefix）
+- LINE Webhook 端點：`/callback`（原 `/bot/callback`，對齊 Ngrok 設定）
+- 移除 `app.py` 中重複的 `notify_signal` 路由（LINE push 功能已統一至 `notifier.py`）
+- `app.py` 新增 `WEB_PORT` 環境變數支援，預設 6688（對應 Ngrok 轉發 Port）
+
+### 🐳 Docker & 環境設定
+- `docker-compose.yml` web_dashboard 新增 `WEB_PORT=5000` 環境變數
+- `.env` 新增 `WEB_PORT=6688`（本地開發用，Ngrok 轉發目標）
+- `.env` 新增 `LINE_USER_ID=`（推送目標用戶 ID）
+
+### 🧹 代碼清理
+- `handler.py` 合併原有 `reply_message()` 與 `process_command()` 為統一架構
+- 移除 handler.py 中分散的 `import requests`，統一為頂層 `import requests as http_requests`
+- DB Engine 改為 Lazy Init（`_get_db_engine()`），避免模組載入時連線失敗
+
+### 🧪 測試驗證
+- 新增 `strategies/tests/test_line_push.py` — LINE Bot 完整功能測試腳本
+- 測試 1: Flex Message JSON 結構驗證（通過）
+- 測試 2: Handler 命令解析 — Top5/ML/status/help/strategies/非命令過濾（通過）
+- 測試 3 (可選): `--db` DB 查詢命令
+- 測試 4 (可選): `--send` 實際 LINE 發送
+- 所有檔案 `py_compile` 語法編譯通過
+
+---
+
+## 2026-02-12 - 第二輪架構清洗與文件同步
+
+### 🧹 代碼清洗（去重/去髒）
+- `run_daily_screener.py`：移除未使用 `os` 匯入
+- `run_screener_backtest.py`：移除未使用 `screen_*` / `calc_rule_score` 匯入
+- `engine.py`：移除未使用 `os`/`numpy`/`datetime`、重複策略匯入與未使用變數 `feat_cols`
+
+### 🗂️ 冗餘檔案清理
+- 刪除 `README.md.backup`
+- 刪除全專案 `__pycache__/` 快取目錄（確認剩餘數量 = 0）
+
+### 📘 README 動態同步
+- 修正 ML 策略描述：`XGBoost 18特徵`（取代舊的 25 特徵描述）
+- 修正評分機制為實際公式：`Rating = Raw_Score × (Confidence / 0.5)`
+- 移除失效測試指令（`test_local.py`、`test_line_notification.py`）
+- 更新專案結構區塊，修正亂碼行並加入 `train_local_model.py`
+- 回測績效改為「即時重算說明」，避免硬編碼過時數值
+
+### ✅ 全功能測試結果
+- 語法編譯檢查：`python -m py_compile`（通過）
+- Daily Screener（無 ML）：通過
+- Daily Screener（有 ML）：通過（MSFT 顯示 65% 信心度加權）
+- Walk-Forward 回測（12 個月 Top-5）：通過（策略總報酬 +4.13%，勝率 66.7%）
+
+## 2026-02-12 - Phase 8: Final Cleanup & ML Activation
+
+### 🐳 Docker Port 分離
+- `strategy_engine` 服務新增 `ports: "5001:5000"`，與 `web_dashboard` (5000) 分開
+- 避免 Flask 端口衝突
+
+### 🤖 ML 加權啟用
+- `engine.py` 重構 `_init_ml()`：直接使用 `StrategyModel.load()` 載入 model.pkl
+- 新增 `_predict_ml(df, info)` 方法：呼叫 `make_features` → `predict_proba` → 回傳信心度
+- 評分公式：`Rating = Raw_Score × (Confidence / 0.5)`（ML 看好時加權，否則維持原始分）
+- `run_daily_screener.py` 報表新增「信心度」欄位，ML 狀態改用 ✅/❌ 顯示
+
+### 📡 Yahoo Finance 即時回落
+- `evaluate_stock()` 中若 `pegRatio`/`trailingPegRatio` 為空，自動重新 `yf.Ticker(symbol).info` 補齊
+- 補齊欄位：pegRatio, trailingPegRatio, returnOnEquity, priceToBook, trailingPE, operatingCashflow, totalRevenue, totalAssets
+
+### 🔧 Rel_Strength_SPY 修正
+- `features.py` `_fetch_spy_close()`：SPY 資料 `tz_localize(None)` + `normalize()` 對齊日期
+- `make_features()` 入口統一移除 df.index 時區，徹底解決 tz-aware vs tz-naive 衝突
+
+### 🧹 程式碼清理與整合
+
+#### DatabaseAdapter 新增共用方法
+| 方法 | 說明 |
+|------|------|
+| `get_macro_data(lookback_years)` | macro_data pivot 查詢 + ffill/bfill |
+| `get_fundamental_data(symbols)` | stock_fundamentals 查詢（修正 `revenue_growth_yoy AS roe` 錯誤別名） |
+
+#### 重構消除重複 SQL
+| 檔案 | 變更 |
+|------|------|
+| `ml_strategy.py` | `_get_macro_data()` / `_get_fundamental_data()` 改委派至 DatabaseAdapter（-80 行） |
+| `train_model.py` | `load_data_from_db()` 改用 `db.get_macro_data()` / `db.get_fundamental_data()`（-40 行） |
+| `engine.py` | `evaluate_stock()` 改用共用 `evaluate_stock_rules()` |
+| `run_screener_backtest.py` | `evaluate_at_date()` 改用共用 `evaluate_stock_rules()`；移除未使用 `calc_support_resistance` import |
+
+#### 新增共用函式
+| 函式 | 位置 | 說明 |
+|------|------|------|
+| `evaluate_stock_rules(df, info)` | `config.py` | 四策略評估 + rule_score 計算，供 engine.py / backtest 共用 |
+
+#### Bug 修正
+- 修正 `revenue_growth_yoy AS roe` 錯誤別名（ROE 實際拿到的是營收成長率）
+- 修正 `run_screener_backtest.py` 重構後殘留代碼塊造成 IndentationError
+
+### 🤖 ML 模型重訓
+- 新增 `train_local_model.py`：不依賴 DB，直接用 yfinance 下載 5 年數據訓練
+- XGBoost 300 棵樹、max_depth=5、lr=0.01、lambda=1.0、gamma=0.1
+- 18 個純技術面特徵，20 支股票，訓練集 18560 樣本
+- 測試集準確率 56.9%、精確率 37.1%、召回率 49.8%、F1 42.5%
+- 最重要特徵：Volatility_20 (13.2%)、SMA_Diff (6.7%)、Volume_Volatility (6.4%)
+
+### 📊 測試驗證結果
+- ✅ Walk-Forward 回測：12 個月、31 支股票、Top-5、勝率 58.3%
+- ✅ Daily Screener（無 ML）：正常輸出，格式正確
+- ✅ Daily Screener（有 ML）：MSFT 65% 信心度加權成功，信心度欄位正確顯示
+- ✅ 全模組 import 無錯誤
+
+## 2026-02-12 - Secrets ?? + ???????
+
+### ????
+- ??? `get_secret()` ?? Docker Secrets ? env ? default
+- ?? `strategies/src/utils/db.py` ? `web/db.py`??? DB ???????
+- `strategies/src/adapters/database.py`?`scripts/populate_mock_macro.py`?`web/app.py` ?? DB helper
+- `web/app.py` ?? `bot.handler.get_secret` ????
+- README ????????????
+
+### ??
+- `python -m py_compile`???? Web ?????
+
 ## 2026-02-11 - 架構清洗與重複邏輯整合 ✅
 
 ### 🧹 新增共用模組

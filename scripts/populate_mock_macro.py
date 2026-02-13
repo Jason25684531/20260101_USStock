@@ -11,7 +11,6 @@ populate_mock_macro.py — FRED 不可用時，填入基線宏觀經濟數據
     python scripts/populate_mock_macro.py
     或在 Docker 中：docker-compose exec strategies python scripts/populate_mock_macro.py
 """
-import os
 import sys
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -24,7 +23,9 @@ sys.path.insert(0, str(project_root / "strategies" / "src"))
 from dotenv import load_dotenv
 load_dotenv(dotenv_path=project_root / ".env")
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
+
+from utils.db import get_engine
 
 
 # =============================================
@@ -46,21 +47,6 @@ MONTHLY_DRIFT = {
     "CPIAUCSL": Decimal("0.5"),
     "T10Y2Y":   Decimal("0.01"),
 }
-
-
-def get_engine():
-    """建立資料庫連線"""
-    db_host = os.getenv("DB_HOST", "localhost")
-    db_port = os.getenv("DB_PORT", "3306")
-    db_user = os.getenv("DB_USER", "root")
-    db_pass = os.getenv("DB_PASSWORD", "rootpassword")
-    db_name = os.getenv("DB_NAME", "usstock")
-
-    url = (
-        f"mysql+mysqlconnector://{db_user}:{db_pass}@"
-        f"{db_host}:{db_port}/{db_name}?charset=utf8mb4"
-    )
-    return create_engine(url, echo=False)
 
 
 def populate(engine, start_date: str = "2022-01-01"):

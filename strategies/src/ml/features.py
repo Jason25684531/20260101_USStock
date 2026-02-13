@@ -163,6 +163,7 @@ def _fetch_spy_close(index: pd.DatetimeIndex) -> Optional[pd.Series]:
     """
     取得 SPY 收盤價序列（用於計算相對強度）。
     嘗試 yfinance 下載；失敗時返回 None。
+    確保日期完全對齊（去除時區 + reindex + ffill）。
     """
     try:
         import yfinance as yf
@@ -173,7 +174,16 @@ def _fetch_spy_close(index: pd.DatetimeIndex) -> Optional[pd.Series]:
             df_spy.columns = df_spy.columns.droplevel(1)
         if df_spy.empty:
             return None
-        return df_spy['Close'].reindex(index, method='ffill')
+        # 移除時區資訊以確保與 stock index 相容
+        if df_spy.index.tz is not None:
+            df_spy.index = df_spy.index.tz_localize(None)
+        spy_close = df_spy['Close']
+        # 將 stock index 也統一為 tz-naive
+        clean_index = index.tz_localize(None) if index.tz is not None else index
+        # 精確到日期對齊：先 normalize 再 reindex + ffill
+        spy_close.index = spy_close.index.normalize()
+        clean_index_norm = clean_index.normalize()
+        return spy_close.reindex(clean_index_norm, method='ffill')
     except Exception:
         return None
 
@@ -188,6 +198,7 @@ def calculate_relative_strength_spy(
     
     公式: Stock_Return_Nd / SPY_Return_Nd
     識別在市場修正中仍跑贏大盤的個股。
+    確保 SPY 日期與個股完全對齊後再做除法。
     
     Args:
         prices: 個股收盤價序列
@@ -251,6 +262,10 @@ def make_features(
         包含特徵和標籤的 DataFrame
     """
     df = df_price.copy()
+
+    # 統一去除時區資訊（yfinance 可能返回 tz-aware DatetimeIndex）
+    if hasattr(df.index, 'tz') and df.index.tz is not None:
+        df.index = df.index.tz_localize(None)
     
     # 確保 Close 列存在
     if 'Close' not in df.columns and 'close' in df.columns:

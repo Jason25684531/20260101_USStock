@@ -1,18 +1,19 @@
 """
 Line Bot 通知適配器
 
-提供 Line Bot 推送通知功能，用於發送交易信號和系統警報
+提供 Line Bot 推送通知功能，用於發送交易信號、系統警報、
+及 Flex Message 格式的每日選股推薦報告。
 使用 Docker Secrets 安全管理 Channel Access Token
 
 Author: Quant System
 Created: 2026-01-31
+Updated: 2026-02-12 - 新增 Flex Message 推薦報告
 """
 
-import os
 import json
 import requests
-from datetime import datetime
-from typing import Optional, Dict, Any
+from datetime import datetime, date
+from typing import Optional, Dict, List
 
 from utils.security import get_secret
 
@@ -202,6 +203,136 @@ class LineNotifier:
 """.strip()
         
         return self.send_text(message)
+
+    # ===========================================================
+    # Flex Message 每日推薦報告
+    # ===========================================================
+
+    def send_flex_report(self, recommendations: List[Dict]) -> bool:
+        """
+        發送 Flex Message 格式的每日選股推薦報告
+
+        Args:
+            recommendations: get_top_recommendations() 的結果列表
+                每個 dict 需包含: rank, symbol, signal, total_score,
+                current_price, ml_confidence, support_1, resistance_1,
+                breakout_pass, acceleration_pass, peg_pass, dupont_pass
+
+        Returns:
+            是否發送成功
+        """
+        if not recommendations:
+            return self.send_text("📊 今日無推薦標的")
+
+        bubbles = [self._build_stock_bubble(rec) for rec in recommendations[:10]]
+
+        scan_date = date.today().strftime('%Y/%m/%d')
+        flex_message = {
+            "type": "flex",
+            "altText": f"📊 每日選股推薦 Top {len(recommendations)} — {scan_date}",
+            "contents": {
+                "type": "carousel",
+                "contents": bubbles,
+            }
+        }
+
+        return self._send_message([flex_message])
+
+    def _build_stock_bubble(self, rec: Dict) -> Dict:
+        """
+        建構單支股票的 Flex Bubble
+
+        Args:
+            rec: 單支推薦結果 dict
+
+        Returns:
+            LINE Flex Bubble JSON dict
+        """
+        signal = rec.get('signal', 'N/A')
+        signal_color = "#00C853" if signal == 'BUY' else "#FF1744"
+        ml_conf = rec.get('ml_confidence', 0) or 0
+        ml_str = f"{ml_conf:.0%}" if ml_conf > 0 else "—"
+
+        # 策略通過指標
+        strats = []
+        if rec.get('breakout_pass'):
+            strats.append("突破")
+        if rec.get('acceleration_pass'):
+            strats.append("加速")
+        if rec.get('peg_pass'):
+            strats.append("PEG")
+        if rec.get('dupont_pass'):
+            strats.append("杜邦")
+
+        body_rows = [
+            self._flex_kv("💰 價格", f"${rec['current_price']:.2f}"),
+            self._flex_kv("📊 評分", f"{rec['total_score']:.1f}/5"),
+            self._flex_kv("🤖 ML 信心度", ml_str),
+            self._flex_kv("✅ 策略", " | ".join(strats) if strats else "—"),
+        ]
+
+        s1 = rec.get('support_1')
+        r1 = rec.get('resistance_1')
+        if s1:
+            body_rows.append(self._flex_kv("📉 支撐", f"${s1:.2f}"))
+        if r1:
+            body_rows.append(self._flex_kv("📈 壓力", f"${r1:.2f}"))
+
+        return {
+            "type": "bubble",
+            "size": "kilo",
+            "header": {
+                "type": "box",
+                "layout": "horizontal",
+                "contents": [
+                    {
+                        "type": "text",
+                        "text": f"#{rec.get('rank', '?')} {rec['symbol']}",
+                        "weight": "bold",
+                        "size": "lg",
+                        "color": "#FFFFFF",
+                    },
+                    {
+                        "type": "text",
+                        "text": signal,
+                        "weight": "bold",
+                        "size": "sm",
+                        "align": "end",
+                        "color": "#FFFFFF",
+                    },
+                ],
+                "backgroundColor": signal_color,
+                "paddingAll": "15px",
+            },
+            "body": {
+                "type": "box",
+                "layout": "vertical",
+                "contents": body_rows,
+                "spacing": "sm",
+                "paddingAll": "13px",
+            },
+        }
+
+    @staticmethod
+    def _flex_kv(label: str, value: str) -> Dict:
+        """
+        建構 Flex Message 鍵值對行
+
+        Args:
+            label: 左側標籤
+            value: 右側數值
+
+        Returns:
+            LINE Flex Box JSON dict
+        """
+        return {
+            "type": "box",
+            "layout": "horizontal",
+            "contents": [
+                {"type": "text", "text": label, "size": "sm", "color": "#555555", "flex": 0},
+                {"type": "text", "text": value, "size": "sm", "color": "#111111", "align": "end"},
+            ],
+        }
 
 
 # 全局通知器實例

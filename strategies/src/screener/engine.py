@@ -9,26 +9,22 @@
   5. 排名輸出 Top N 推薦
   6. 存入 DB / 推送 Line 通知
 """
-import os
 import sys
 import json
 import time
 from pathlib import Path
-from datetime import datetime, date
+from datetime import date
 from typing import List, Dict, Optional, Tuple
 
 import pandas as pd
-import numpy as np
 import yfinance as yf
 
 # 路徑設定
 _SRC_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(_SRC_DIR))
 
-from strategies.momentum import screen_breakout, screen_acceleration
-from strategies.fundamental import screen_peg, screen_dupont
 from screener.support_resistance import calc_support_resistance
-from config import DEFAULT_SYMBOLS, calc_rule_score
+from config import DEFAULT_SYMBOLS, evaluate_stock_rules
 
 
 class DailyScreener:
@@ -37,35 +33,81 @@ class DailyScreener:
     def __init__(
         self,
         symbols: List[str] = None,
-        use_ml: bool = False,
+        use_ml: bool = None,
         top_n: int = 5,
         delay: float = 0.3,
     ):
         """
         Args:
             symbols: 股票池 (預設 DEFAULT_SYMBOLS)
-            use_ml: 是否啟用 ML 信心度加權
+            use_ml: 是否啟用 ML 信心度加權 (None=自動偵測, True=強制啟用, False=禁用)
             top_n: 輸出 Top N 推薦
             delay: yfinance 請求間隔秒數, 避免限流
         """
         self.symbols = symbols or DEFAULT_SYMBOLS
-        self.use_ml = use_ml
         self.top_n = top_n
         self.delay = delay
         self._ml_strategy = None
+        
+        # 自動偵測 ML 模型
+        if use_ml is None:
+            # 若 data/model.pkl 或 data/test_model.pkl 存在，自動啟用 ML
+            data_dir = Path(__file__).parent.parent.parent / 'data'
+            model_path = data_dir / 'model.pkl'
+            test_model_path = data_dir / 'test_model.pkl'
+            self.use_ml = model_path.exists() or test_model_path.exists()
+        else:
+            self.use_ml = use_ml
 
         if self.use_ml:
             self._init_ml()
 
     def _init_ml(self):
-        """嘗試載入 ML 策略 (若 model.pkl 不存在則降級)"""
+        """嘗試載入 ML 模型 (從 data/model.pkl，若不存在則降級)"""
         try:
-            from strategies.ml_strategy import MLStrategy
-            self._ml_strategy = MLStrategy()
-            print("✅ ML 策略已載入, 將作為第 5 評分維度")
+            from ml.model import StrategyModel
+            from ml.features import make_features, get_feature_columns
+            self._ml_model = StrategyModel.load()  # 預設 data/model.pkl
+            self._make_features = make_features
+            self._get_feature_columns = get_feature_columns
+            self._ml_strategy = True  # 標記已載入
+            print("✅ ML 模型已載入, 將使用信心度加權評分")
         except Exception as e:
-            print(f"⚠️  ML 策略載入失敗, 僅使用規則策略: {e}")
+            print(f"⚠️  ML 模型載入失敗, 僅使用規則策略: {e}")
             self._ml_strategy = None
+            self._ml_model = None
+
+    def _predict_ml(self, df: pd.DataFrame, info: dict) -> tuple:
+        """
+        使用已載入的 ML 模型對單支股票進行預測
+
+        Args:
+            df: yfinance 價格 DataFrame (至少 60 天)
+            info: yfinance ticker.info dict
+
+        Returns:
+            (confidence, signal)  — confidence 0~1, signal BUY/SELL/HOLD
+        """
+        df_feat = self._make_features(df)
+        if df_feat.empty:
+            return 0.0, 'N/A'
+
+        latest = df_feat.iloc[[-1]]
+
+        # 補齊缺失特徵
+        for f in self._ml_model.feature_names:
+            if f not in latest.columns:
+                latest[f] = 0
+
+        X = latest[self._ml_model.feature_names]
+        proba = self._ml_model.predict_proba(X)[0]
+        up_prob = float(proba[1])
+
+        if up_prob >= 0.55:
+            return up_prob, 'BUY'
+        elif up_prob <= 0.3:
+            return 0.0, 'SELL'
+        return 0.0, 'HOLD'
 
     # ----------------------------------------------------------
     # 數據獲取
@@ -104,36 +146,54 @@ class DailyScreener:
         if df is None or len(df) < 60:
             return None
 
+        # --- Yahoo Fallback: 補齊 PEG / ROE ---
+        if not info.get('pegRatio') and not info.get('trailingPegRatio'):
+            try:
+                fresh = yf.Ticker(symbol).info or {}
+                for k in ('pegRatio', 'trailingPegRatio', 'returnOnEquity',
+                          'priceToBook', 'trailingPE', 'operatingCashflow',
+                          'totalRevenue', 'totalAssets'):
+                    if fresh.get(k) is not None and info.get(k) is None:
+                        info[k] = fresh[k]
+            except Exception:
+                pass
+
         close_col = 'Close' if 'Close' in df.columns else 'close'
         current_price = float(df[close_col].iloc[-1])
 
-        # --- 4 個規則策略 ---
-        r_breakout = screen_breakout(df)
-        r_accel = screen_acceleration(df, n=20)
-        r_peg = screen_peg(info)
-        r_dupont = screen_dupont(info)
+        # --- 4 個規則策略（使用共用函式）---
+        eval_result = evaluate_stock_rules(df, info)
+        if eval_result is None:
+            return None
+        r_breakout = eval_result['breakout']
+        r_accel = eval_result['acceleration']
+        r_peg = eval_result['peg']
+        r_dupont = eval_result['dupont']
+        rule_score = eval_result['rule_score']
+        passes = eval_result['passes']
 
         # --- ML 信心度 (可選) ---
         ml_conf = 0.0
         ml_signal = 'N/A'
-        if self._ml_strategy:
+        if self._ml_strategy and self._ml_model:
             try:
-                signal, prob, _ = self._ml_strategy.generate_signal(symbol)
-                ml_conf = float(prob) if signal == 'BUY' else 0.0
-                ml_signal = signal
-            except Exception:
-                pass
+                ml_conf, ml_signal = self._predict_ml(df, info)
+            except Exception as e:
+                print(f"    ⚠️ ML 預測失敗: {e}")
 
         # --- 綜合評分 ---
-        rule_score = calc_rule_score(r_breakout, r_accel, r_peg, r_dupont)
-        total_score = rule_score + ml_conf  # 0 ~ 5
+        if ml_conf > 0:
+            # Rating = Raw_Score * (Confidence / 0.5)
+            confidence_factor = ml_conf / 0.5
+            total_score = rule_score * confidence_factor
+        else:
+            total_score = rule_score  # 0 ~ 4
 
         # --- 支撐壓力 ---
         sr = calc_support_resistance(df)
 
         # --- 信號判定 ---
         # BUY: 至少 2 個策略通過 或 總分 >= 2.0
-        passes = sum([r_breakout['pass'], r_accel['pass'], r_peg['pass'], r_dupont['pass']])
         signal_type = 'BUY' if passes >= 2 or total_score >= 2.0 else 'SELL'
 
         return {

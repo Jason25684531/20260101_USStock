@@ -335,20 +335,22 @@ class StrategyModel:
         從文件加載模型
         
         Args:
-            filepath: 模型文件路徑，默認為 data/model.pkl
+            filepath: 模型文件路徑，默認為 data/model.pkl (fallback 到 test_model.pkl)
             
         Returns:
             加載的 StrategyModel 實例
         """
         if filepath is None:
-            # 默認從 data/ 目錄加載
+            # 默認從 data/ 目錄加載，優先 model.pkl，fallback test_model.pkl
             project_root = Path(__file__).parent.parent.parent.parent
             filepath = project_root / 'data' / 'model.pkl'
+            if not filepath.exists():
+                filepath = project_root / 'data' / 'test_model.pkl'
         
         filepath = Path(filepath)
         
         if not filepath.exists():
-            raise FileNotFoundError(f"模型文件不存在: {filepath}")
+            raise FileNotFoundError(f"模型文件不存在: {filepath} (也檢查了 test_model.pkl)")
         
         with open(filepath, 'rb') as f:
             model_data = pickle.load(f)

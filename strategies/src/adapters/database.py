@@ -1,18 +1,13 @@
-"""
+﻿"""
 數據庫適配器 - 處理市場數據和回測結果的持久化
 """
-import os
 from datetime import datetime
 from typing import Optional
 import pandas as pd
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
-# 使用絕對導入
-import sys
-from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
-from utils.security import get_secret
+from utils.db import get_db_config, get_engine
 
 
 class DatabaseAdapter:
@@ -20,20 +15,9 @@ class DatabaseAdapter:
     
     def __init__(self):
         """初始化數據庫連接"""
-        db_host = os.getenv('DB_HOST', 'localhost')
-        db_port = os.getenv('DB_PORT', '3306')
-        db_user = os.getenv('DB_USER', 'root')
-        # 使用 Docker Secrets 獲取密碼
-        db_pass = get_secret('db_root_password', default=os.getenv('DB_PASSWORD', 'rootpassword'))
-        db_name = os.getenv('DB_NAME', 'usstock')
-        
-        connection_string = (
-            f"mysql+mysqlconnector://{db_user}:{db_pass}@"
-            f"{db_host}:{db_port}/{db_name}?charset=utf8mb4"
-        )
-        
-        self.engine: Engine = create_engine(connection_string, echo=False)
-        print(f"✅ 數據庫連接已建立: {db_host}:{db_port}/{db_name}")
+        config = get_db_config()
+        self.engine: Engine = get_engine(config, echo=False)
+        print(f"✅ 數據庫連接已建立: {config['host']}:{config['port']}/{config['name']}")
     
     def save_market_data(self, df: pd.DataFrame, symbol: str) -> int:
         """
@@ -322,3 +306,94 @@ class DatabaseAdapter:
         if self.engine:
             self.engine.dispose()
             print("✅ 數據庫連接已關閉")
+
+    # ----------------------------------------------------------
+    # 共用查詢：宏觀經濟數據
+    # ----------------------------------------------------------
+
+    def get_macro_data(self, lookback_years: int = None) -> pd.DataFrame:
+        """
+        從 macro_data 表取得寬格式宏觀指標，前向填充。
+
+        Args:
+            lookback_years: 回看年數，None 表示全部
+
+        Returns:
+            DataFrame (index=date, cols=UNRATE/GDP/DFF/CPIAUCSL/T10Y2Y)
+        """
+        where_clause = ""
+        if lookback_years:
+            where_clause = f"WHERE date >= DATE_SUB(CURDATE(), INTERVAL {int(lookback_years)} YEAR)"
+
+        query = text(f"""
+            SELECT
+                date,
+                MAX(CASE WHEN ticker = 'UNRATE'   THEN value END) AS UNRATE,
+                MAX(CASE WHEN ticker = 'GDP'       THEN value END) AS GDP,
+                MAX(CASE WHEN ticker = 'DFF'       THEN value END) AS DFF,
+                MAX(CASE WHEN ticker = 'CPIAUCSL'  THEN value END) AS CPIAUCSL,
+                MAX(CASE WHEN ticker = 'T10Y2Y'    THEN value END) AS T10Y2Y
+            FROM macro_data
+            {where_clause}
+            GROUP BY date
+            ORDER BY date
+        """)
+
+        try:
+            df = pd.read_sql(query, self.engine)
+            if not df.empty:
+                df.set_index('date', inplace=True)
+                df.index = pd.to_datetime(df.index)
+                df = df.ffill().bfill()
+            return df
+        except Exception as e:
+            print(f"  ⚠️ 取得宏觀數據失敗: {e}")
+            return pd.DataFrame()
+
+    # ----------------------------------------------------------
+    # 共用查詢：基本面數據
+    # ----------------------------------------------------------
+
+    def get_fundamental_data(self, symbols) -> pd.DataFrame:
+        """
+        從 stock_fundamentals 表取得基本面數據。
+
+        Args:
+            symbols: 單一字串或 list
+
+        Returns:
+            DataFrame (index=data_date)
+        """
+        if isinstance(symbols, str):
+            symbols = [symbols]
+
+        placeholders = ', '.join([f":s{i}" for i in range(len(symbols))])
+        params = {f"s{i}": s for i, s in enumerate(symbols)}
+
+        query = text(f"""
+            SELECT
+                data_date,
+                symbol,
+                peg_ratio,
+                pe_ratio,
+                pb_ratio,
+                revenue_growth_yoy,
+                earnings_growth_yoy,
+                inst_ownership_pct,
+                market_cap
+            FROM stock_fundamentals
+            WHERE symbol IN ({placeholders})
+            ORDER BY data_date
+        """)
+
+        try:
+            df = pd.read_sql(query, self.engine, params=params)
+            if not df.empty:
+                df['data_date'] = pd.to_datetime(df['data_date'])
+                df.set_index('data_date', inplace=True)
+                if 'symbol' in df.columns and len(symbols) == 1:
+                    df = df.drop(columns=['symbol'])
+            return df
+        except Exception as e:
+            print(f"  ⚠️ 取得基本面數據失敗: {e}")
+            return pd.DataFrame()

@@ -12,35 +12,28 @@ import os
 from flask import Flask, render_template, jsonify
 from flask_httpauth import HTTPBasicAuth
 from werkzeug.security import check_password_hash, generate_password_hash
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 from datetime import datetime
 
 # 導入安全工具和 Line Bot Blueprint
 from security import get_secret
 from bot import line_bot_bp
+from db import get_db_config, get_engine
 
 app = Flask(__name__)
 auth = HTTPBasicAuth()
 
 # 註冊 Line Bot Blueprint
-app.register_blueprint(line_bot_bp, url_prefix='/bot')
+# Webhook 端點: /callback (LINE Platform 呼叫)
+# Debug 端點: /webhook/info
+app.register_blueprint(line_bot_bp)
 
 
 # ============================================
 # 數據庫配置
 # ============================================
-DB_HOST = os.getenv('DB_HOST', 'localhost')
-DB_PORT = os.getenv('DB_PORT', '3306')
-DB_USER = os.getenv('DB_USER', 'root')
-DB_PASS = get_secret('db_root_password', default=os.getenv('DB_PASSWORD', 'rootpassword'))
-DB_NAME = os.getenv('DB_NAME', 'usstock')
-
-# 建立數據庫連接
-connection_string = (
-    f"mysql+mysqlconnector://{DB_USER}:{DB_PASS}@"
-    f"{DB_HOST}:{DB_PORT}/{DB_NAME}?charset=utf8mb4"
-)
-engine = create_engine(connection_string, echo=False)
+DB_CONFIG = get_db_config()
+engine = get_engine(DB_CONFIG, echo=False)
 
 # ============================================
 # Web 認證配置
@@ -385,73 +378,11 @@ def get_recommendations():
         return jsonify({'error': str(e)}), 500
 
 
-# ============================================
-# Line Bot 通知 API（供策略引擎調用）
-# ============================================
-@app.route('/api/notify/signal', methods=['POST'])
-def notify_signal():
-    """
-    接收策略引擎的交易信號並推送到 Line
-    
-    這是一個內部 API，供策略引擎調用
-    """
-    from flask import request
-    from bot.handler import get_secret
-    import requests
-    
-    data = request.get_json()
-    if not data:
-        return jsonify({'error': 'No data provided'}), 400
-    
-    channel_token = get_secret('line_channel_token')
-    user_id = get_secret('line_user_id')
-    
-    if not channel_token or not user_id:
-        return jsonify({'error': 'Line Bot not configured'}), 503
-    
-    # 構建消息
-    action_emoji = {"BUY": "🟢", "SELL": "🔴", "HOLD": "🟡"}.get(data.get('action', '').upper(), "⚪")
-    
-    message = f"""
-{action_emoji} 交易信號 {action_emoji}
-
-📊 股票: {data.get('symbol', 'N/A')}
-📈 動作: {data.get('action', 'N/A').upper()}
-💰 價格: ${data.get('price', 0):,.2f}
-🎯 策略: {data.get('strategy', 'Unknown')}
-📝 原因: {data.get('reason', 'N/A')}
-
-⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-""".strip()
-    
-    # 推送消息
-    try:
-        response = requests.post(
-            "https://api.line.me/v2/bot/message/push",
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {channel_token}"
-            },
-            json={
-                "to": user_id,
-                "messages": [{"type": "text", "text": message}]
-            },
-            timeout=10
-        )
-        
-        if response.status_code == 200:
-            return jsonify({'status': 'sent'})
-        else:
-            return jsonify({'error': f'Line API error: {response.status_code}'}), 500
-            
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
 if __name__ == '__main__':
+    port = int(os.getenv('WEB_PORT', '6688'))
     print(f"🚀 啟動 Flask 儀表板...")
-    print(f"   數據庫: {DB_HOST}:{DB_PORT}/{DB_NAME}")
-    print(f"   訪問地址: http://0.0.0.0:5000")
-    print(f"   Line Bot Webhook: /bot/callback")
+    print(f"   DB: {DB_CONFIG['host']}:{DB_CONFIG['port']}:{DB_CONFIG['name']}")
+    print(f"   訪問地址: http://0.0.0.0:{port}")
+    print(f"   Line Bot Webhook: /callback")
     print(f"   認證: 用戶名='admin'")
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    app.run(host='0.0.0.0', port=port, debug=True)

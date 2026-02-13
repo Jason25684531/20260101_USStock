@@ -107,3 +107,42 @@ def calc_rule_score(r_breakout: Dict, r_accel: Dict, r_peg: Dict, r_dupont: Dict
         1.0 if r_peg['pass'] else r_peg['score'] * 0.5,
         1.0 if r_dupont['pass'] else r_dupont['score'] * 0.5,
     ])
+
+
+def evaluate_stock_rules(df: pd.DataFrame, info: dict) -> Dict:
+    """
+    對單支股票執行四策略評估（共用邏輯）。
+
+    回傳結果包含 r_breakout / r_accel / r_peg / r_dupont + rule_score + passes。
+    供 engine.py 與 run_screener_backtest.py 共用，避免重複。
+
+    Args:
+        df: 含 OHLCV 的 DataFrame（至少 60 行）
+        info: yfinance ticker.info dict
+
+    Returns:
+        dict with keys: breakout, acceleration, peg, dupont, rule_score, passes
+        若數據不足回傳 None
+    """
+    from strategies.momentum import screen_breakout, screen_acceleration
+    from strategies.fundamental import screen_peg, screen_dupont
+
+    if df is None or len(df) < 60:
+        return None
+
+    r_breakout = screen_breakout(df)
+    r_accel = screen_acceleration(df, n=20)
+    r_peg = screen_peg(info)
+    r_dupont = screen_dupont(info)
+
+    rule_score = calc_rule_score(r_breakout, r_accel, r_peg, r_dupont)
+    passes = sum([r_breakout['pass'], r_accel['pass'], r_peg['pass'], r_dupont['pass']])
+
+    return {
+        'breakout': r_breakout,
+        'acceleration': r_accel,
+        'peg': r_peg,
+        'dupont': r_dupont,
+        'rule_score': round(rule_score, 2),
+        'passes': passes,
+    }

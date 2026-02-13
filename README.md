@@ -29,7 +29,7 @@
 │  ┌──────────────┐    ┌───────────────┐    ┌───────────────┐    │
 │  │   MySQL 8.0   │    │   Strategy    │    │      Web      │    │
 │  │      db       │◄───│    Engine     │───►│   Dashboard   │    │
-│  │  (Port:3308)  │    │  APScheduler  │    │  (Port:5000)  │    │
+│  │  (Port:3308)  │    │  (Port:5001)  │    │  (Port:5000)  │    │
 │  └──────────────┘    └───────┬───────┘    └───────┬───────┘    │
 │                              │                     │            │
 │                              │     Push Signal     │            │
@@ -72,7 +72,8 @@
 
 **ML 策略特點**:
 - 基於 XGBoost 分類器預測股票未來走勢
-- 整合價格、宏觀、基本面三種數據源（**25 個特徵**，含技術指標 + 基本面）
+- 整合價格、技術指標數據（**18 個特徵**，純技術面）
+- **ML 信心度加權**：`Rating = Raw_Score × (Confidence / 0.5)`（ML 看好時放大評分）
 - **Long-Only 策略**: BUY=做多，HOLD/SELL=持現金（不做空）
 - **買入閾值 0.55**（`buy_threshold` 可配置，默認 0.55）
 - 正則化防過擬合 (max_depth=5, lr=0.01, lambda=1.0, gamma=0.1)
@@ -161,19 +162,54 @@ docker-compose -f prod.docker-compose.yml up -d
 ### 設置 Webhook
 
 在 Line Developers Console 設置：
-- **Webhook URL**: `https://your-domain.com/bot/callback`
+- **Webhook URL**: `https://your-domain.ngrok-free.app/callback`
 - **Use webhook**: 開啟
 - **Auto-reply messages**: 關閉
 
+本地開發時使用 Ngrok 轉發：
+```bash
+ngrok http 6688
+```
+
 ### 支援的 Bot 命令
 
-| 命令 | 功能 |
-|------|------|
-| `/help` | 顯示幫助選單 |
-| `/status` | 顯示系統狀態 |
-| `/summary` | 獲取最新每日摘要 |
-| `/positions` | 查看當前持倉 |
-| `/strategies` | 列出可用策略 |
+| 命令 | 功能 | 回覆格式 |
+|------|------|----------|
+| `Top5` | 🏆 今日選股推薦 Top 5（完整版：規則 + ML 加權） | Flex Carousel |
+| `Top5基礎` | 📊 今日選股推薦 Top 5（純規則版：無 ML 加權） | Flex Carousel |
+| `ML AAPL` | 🤖 查詢單支股票 ML 預測 | Text |
+| `/status` | 📊 顯示系統狀態 | Text |
+| `/strategies` | 📈 列出可用策略與版本差異 | Text |
+| `/help` | ❓ 顯示幫助選單 | Text |
+
+**推薦版本差異：**
+- **Top5（完整版）** — 評分 = 規則分 × (ML 信心度 / 0.5)，顯示 ML 百分比
+- **Top5基礎（純規則版）** — 評分 = 純規則分 (0-4)，ML 顯示為「—」
+- **切換方式** — 直接輸入命令名稱即可查看不同版本
+
+### 🤖 ML 信心度自動啟用
+
+**ML 信心度會自動顯示**，條件如下：
+
+| 情景 | ML 顯示 | 說明 |
+|------|--------|------|
+| `data/model.pkl` 或 `test_model.pkl` 存在 | `72%`（數值） | 系統自動啟用 ML |
+| 模型文件不存在 | `—` | 無 ML 模型可用 |
+| `--use-ml false` | `—` | 用戶禁用 ML |
+
+**運行指令：**
+```bash
+# 📌 推薦：自動偵測 ML 模型（最簡單）
+python strategies/scripts/run_daily_screener.py --save-db --notify
+
+# ✅ 強制啟用 ML（即使沒有模型，會拋出錯誤）
+python strategies/scripts/run_daily_screener.py --use-ml true --save-db
+
+# ❌ 禁用 ML（純規則推薦）
+python strategies/scripts/run_daily_screener.py --use-ml false --save-db
+```
+
+---
 
 ## ⏰ 自動調度
 
@@ -199,7 +235,7 @@ USE_SCHEDULER=true
 |------|------|------|
 | **Momentum** | 動量策略 | Close > 200日最高價 (VectorBT) |
 | **Value** | 價值策略 | PE < 15 且 PB < 1.5 (VectorBT) |
-| **ML Strategy** | 機器學習 | XGBoost 25特徵 (Long-Only) |
+| **ML Strategy** | 機器學習 | XGBoost 18特徵 (Long-Only) |
 
 ### 選股策略 (每日推薦)
 
@@ -218,7 +254,7 @@ USE_SCHEDULER=true
 # 基本掃描 (5 支股票)
 python strategies/scripts/run_daily_screener.py --symbols AAPL,MSFT,NVDA,GOOGL,META --top-n 5
 
-# 完整掃描 (51 股) + ML加權 + 存DB + Line通知
+# 完整掌描 (51 股) + ML加權 + 存DB + LINE Flex 通知
 python strategies/scripts/run_daily_screener.py --use-ml --save-db --notify
 
 # Walk-Forward 月度回測
@@ -228,8 +264,9 @@ python strategies/scripts/run_screener_backtest.py --months 12 --top-n 5
 ### 評分機制
 
 - **規則分**: 4 策略各 0~1 分 (通過=1, 部分=score×0.5)
-- **ML 信心度**: 0~1 分 (可選)
-- **綜合分**: 0~5 分
+- **ML 信心度**: 0~1（可選）
+- **綜合分**: `Rating = Raw_Score × (Confidence / 0.5)`（僅當 ML 判定 BUY）
+- **無 ML 或非 BUY**: 維持 `Raw_Score`（範圍 0~4）
 - **BUY 條件**: ≥2 策略通過 或 總分≥2.0
 
 ### 支撐壓力
@@ -238,14 +275,14 @@ python strategies/scripts/run_screener_backtest.py --months 12 --top-n 5
 - ATR(14)×1.5 動態帶寬
 - 20日高低價區間
 
-### 回測績效 (2025-02 → 2026-02)
+### 回測績效說明
 
-| 指標 | 數值 |
-|------|------|
-| 策略總報酬 | +7.11% |
-| 勝率 | 66.7% |
-| 年化 Sharpe | 0.51 |
-| 最大回撤 | -7.20% |
+- 回測結果使用 yfinance 即時調整後數據，會隨市場資料更新而變動。
+- 建議使用下列指令在本機即時重算：
+
+```bash
+python strategies/scripts/run_screener_backtest.py --months 12 --top-n 5
+```
 
 ---
 
@@ -257,12 +294,14 @@ python strategies/scripts/run_screener_backtest.py --months 12 --top-n 5
 # 安裝依賴
 pip install -r requirements.txt
 
-# 運行測試
-cd strategies
-python test_local.py
+# 每日選股（無 ML）
+python strategies/scripts/run_daily_screener.py --symbols AAPL,MSFT,NVDA,GOOGL,META --top-n 3
 
-# 測試 Line 通知
-python test_line_notification.py
+# 每日選股（ML 加權）
+python strategies/scripts/run_daily_screener.py --symbols AAPL,MSFT,NVDA,GOOGL,META --top-n 3 --use-ml
+
+# Walk-Forward 回測
+python strategies/scripts/run_screener_backtest.py --months 12 --top-n 5
 ```
 
 ### 新增策略
@@ -276,45 +315,283 @@ python test_line_notification.py
 
 ```
 USStock/
-├── .github/workflows/     # CI/CD 配置
-├── .secrets/              # 敏感資訊 (git ignored)
-├── database/              # 資料庫配置
-│   ├── init/              # 初始化腳本
-│   └── my.cnf             # MySQL 配置
-├── openspec/              # 規格文檔
-│   ├── changes/           # 變更提案
-│   └── specs/             # 規格定義
-├── strategies/            # 策略引擎
+├── .secrets/                  # 🔒 敏感資訊 (git ignored)
+├── data/
+│   └── reports/               # 回測報告輸出 (CSV, PNG)
+├── database/                  # 資料庫配置
+│   ├── my.cnf                 # MySQL 配置
+│   └── init/                  # DB 初始化腳本
+│       ├── 01_market_data.sql
+│       ├── 02_trade_logs.sql
+│       ├── 05_fundamental_chips.sql
+│       ├── 06_macro_sentiment.sql
+│       └── 07_recommendations.sql
+├── doc/                       # 文件資料
+│   ├── AGENTS.md              # AI Agent 協作規範
+│   ├── CLAUDE.md              # Claude AI 開發規則
+│   ├── LOCAL_SIMULATION_GUIDE.md
+│   ├── ML_PLATFORM_GUIDE.md
+│   └── updatelist.md          # 更新日誌
+├── openspec/                  # 開發規格與提案
+│   ├── AGENTS.md
+│   ├── project.md
+│   └── changes/               # 變更提案歷史
+├── scripts/                   # 全域工具腳本
+│   ├── migrate_secrets_to_env.py
+│   └── populate_mock_macro.py
+├── strategies/                # 🧠 策略引擎服務
+│   ├── Dockerfile
+│   ├── requirements.txt
+│   ├── train_model.py         # DB 版模型訓練
+│   ├── data/                  # 模型文件 (model.pkl)
 │   ├── src/
-│   │   ├── config.py      # 🆕 共用常量與函式 (股票池/RSI/ATR/評分)
-│   │   ├── adapters/      # 數據適配器
-│   │   ├── core/          # 核心回測引擎
-│   │   ├── ml/            # ML 模型 (XGBoost)
-│   │   ├── screener/      # 每日選股引擎
-│   │   │   ├── engine.py          # 選股主引擎
+│   │   ├── config.py          # 共用常量與函式 (股票池/RSI/ATR/評分)
+│   │   ├── main.py            # 策略入口 (APScheduler 調度)
+│   │   ├── adapters/          # 外部服務適配器
+│   │   │   ├── broker.py      #   MockBroker / Alpaca 接口
+│   │   │   ├── database.py    #   DatabaseAdapter (MySQL CRUD)
+│   │   │   ├── market_data.py #   yfinance 市場數據
+│   │   │   └── notifier.py    #   LINE 推播通知
+│   │   ├── core/
+│   │   │   └── backtest.py    #   VectorBT 回測引擎 (ATR 追蹤停損)
+│   │   ├── ml/
+│   │   │   ├── features.py    #   ML 特徵工程 (18 個特徵)
+│   │   │   └── model.py       #   StrategyModel (XGBoost 訓練/預測)
+│   │   ├── screener/
+│   │   │   ├── engine.py      #   每日選股主引擎
 │   │   │   └── support_resistance.py  # 支撐壓力計算
-│   │   ├── strategies/    # 策略實現
-│   │   │   ├── momentum.py        # 動量 + Breakout + Acceleration
-│   │   │   ├── fundamental.py     # PEG + DuPont 篩選
-│   │   │   ├── value.py           # 價值策略
-│   │   │   └── ml_strategy.py     # ML 策略
-│   │   └── utils/         # 工具函數
+│   │   ├── strategies/
+│   │   │   ├── momentum.py    #   動量 + Breakout + Acceleration
+│   │   │   ├── fundamental.py #   PEG + DuPont 篩選
+│   │   │   ├── value.py       #   價值策略
+│   │   │   └── ml_strategy.py #   ML 策略 (fetch_data 整合)
+│   │   └── utils/
+│   │       ├── security.py    #   Docker Secrets 管理
+│   │       └── db.py          #   DB config + engine
 │   ├── scripts/
-│   │   ├── run_daily_screener.py   # 每日選股 CLI
-│   │   └── run_screener_backtest.py  # 選股策略回測
-│   └── tests/             # 測試文件
-├── web/                   # Web 服務
-│   ├── bot/               # Line Bot 處理器
-│   ├── static/            # 靜態資源
-│   └── templates/         # HTML 模板
-├── docker-compose.yml     # 開發環境配置
-├── prod.docker-compose.yml # 生產環境配置
-└── README.md              # 本文件
+│   │   ├── run_daily_screener.py      # 每日選股 CLI
+│   │   ├── run_screener_backtest.py   # 選股策略回測
+│   │   ├── run_ml_backtest_2024.py    # ML Walk-Forward 回測
+│   │   ├── ingest_full_data.py        # 歷史數據入庫
+│   │   └── train_local_model.py       # 本地模型訓練 (無 DB)
+│   └── tests/
+│       └── test_line_push.py          # LINE 推播測試
+├── web/                       # 🌐 Web Dashboard 服務
+│   ├── Dockerfile
+│   ├── requirements.txt
+│   ├── app.py                 # Flask 主應用 (Dashboard + API)
+│   ├── db.py                  # DB config + engine
+│   ├── security.py            # Docker Secrets 管理
+│   ├── bot/
+│   │   ├── __init__.py        # Blueprint 導出
+│   │   └── handler.py         # Webhook + Top5/ML 命令 + Flex
+│   ├── static/                # 靜態資源
+│   └── templates/
+│       └── index.html         # Dashboard 首頁
+├── docker-compose.yml         # 開發環境配置
+├── prod.docker-compose.yml    # 生產環境配置
+├── requirements.txt           # 全域 Python 依賴
+└── README.md                  # 本文件
+```
+
+### 模組依賴關係
+
+```
+config.py (共用常量/函式)
+  ├── strategies/*.py        (calc_rsi, calc_atr, evaluate_stock_rules)
+  ├── ml/features.py         (calc_rsi → calculate_rsi 委派)
+  ├── core/backtest.py       (calc_atr → calculate_atr 委派)
+  ├── screener/engine.py     (calc_rule_score, evaluate_stock_rules)
+  └── scripts/*.py           (BACKTEST_SYMBOLS, DEFAULT_SYMBOLS)
+
+adapters/market_data.py
+  ├── ml_strategy.py         (fetch_data)
+  ├── screener/engine.py     (fetch_data, fetch_fundamentals)
+  └── scripts/*.py           (fetch_data, fetch_multiple)
+
+adapters/database.py → utils/db.py → utils/security.py
+web/db.py → web/security.py
+```
+
+## 🧪 完整測試指南
+
+### 虛擬環境設置
+
+```powershell
+# 建立虛擬環境 (首次)
+python -m venv .venv
+
+# 啟動虛擬環境 (Windows PowerShell)
+.\.venv\Scripts\Activate.ps1
+
+# 啟動虛擬環境 (Linux/macOS)
+source .venv/bin/activate
+
+# 安裝依賴
+pip install -r requirements.txt
+pip install -r strategies/requirements.txt
+pip install -r web/requirements.txt
+```
+
+### 1. 編譯檢查 (Syntax)
+
+```bash
+# 策略引擎 — 核心模組
+python -m py_compile strategies/src/config.py
+python -m py_compile strategies/src/main.py
+python -m py_compile strategies/src/adapters/database.py
+python -m py_compile strategies/src/adapters/market_data.py
+python -m py_compile strategies/src/adapters/broker.py
+python -m py_compile strategies/src/adapters/notifier.py
+python -m py_compile strategies/src/ml/features.py
+python -m py_compile strategies/src/ml/model.py
+python -m py_compile strategies/src/screener/engine.py
+python -m py_compile strategies/src/screener/support_resistance.py
+python -m py_compile strategies/src/strategies/momentum.py
+python -m py_compile strategies/src/strategies/fundamental.py
+python -m py_compile strategies/src/strategies/value.py
+python -m py_compile strategies/src/strategies/ml_strategy.py
+python -m py_compile strategies/src/core/backtest.py
+
+# Web 服務
+python -m py_compile web/app.py
+python -m py_compile web/db.py
+python -m py_compile web/security.py
+python -m py_compile web/bot/handler.py
+
+# 腳本
+python -m py_compile strategies/scripts/run_daily_screener.py
+python -m py_compile strategies/scripts/run_screener_backtest.py
+python -m py_compile strategies/scripts/train_local_model.py
+python -m py_compile strategies/scripts/run_ml_backtest_2024.py
+python -m py_compile strategies/scripts/ingest_full_data.py
+```
+
+### 2. 模組導入驗證
+
+```bash
+# 策略引擎模組（需在 strategies/src/ 目錄下執行）
+cd strategies/src
+python -c "from config import DEFAULT_SYMBOLS, BACKTEST_SYMBOLS, calc_rsi, calc_atr, calc_rule_score; print('config OK')"
+python -c "from utils.security import get_secret; print('security OK')"
+python -c "from utils.db import get_db_config, get_engine; print('db OK')"
+python -c "from adapters.database import DatabaseAdapter; print('DatabaseAdapter OK')"
+python -c "from adapters.market_data import fetch_data, fetch_multiple, get_latest_price; print('market_data OK')"
+python -c "from ml.features import build_features; print('features OK')"
+python -c "from ml.model import StrategyModel; print('model OK')"
+python -c "from screener.engine import DailyScreenerEngine; print('screener OK')"
+python -c "from strategies import MomentumStrategy; print('strategies OK')"
+python -c "from core.backtest import run_backtest; print('backtest OK')"
+cd ../..
+
+# Web 模組（需在 web/ 目錄下執行）
+cd web
+python -c "from security import get_secret; print('web security OK')"
+python -c "from db import get_db_config; print('web db OK')"
+cd ..
+```
+
+### 3. 功能測試
+
+```bash
+# 共用函式測試（不需 DB）
+cd strategies/src
+python -c "
+import pandas as pd, numpy as np
+from config import calc_rsi, calc_atr, calc_rule_score
+s = pd.Series(np.random.uniform(100, 200, 50))
+print(f'RSI: {calc_rsi(s).iloc[-1]:.2f}')
+h = pd.Series(np.random.uniform(150, 200, 50))
+l = pd.Series(np.random.uniform(100, 150, 50))
+print(f'ATR: {calc_atr(h, l, s).iloc[-1]:.2f}')
+score = calc_rule_score({'Breakout': True, 'Acceleration': True, 'PEG': False, 'DuPont': True}, {})
+print(f'Rule Score: {score}')
+print('ALL TESTS PASSED')
+"
+cd ../..
+
+# LINE Bot 測試
+python strategies/tests/test_line_push.py
+```
+
+### 4. 線上功能測試 (需 Docker 啟動)
+
+```bash
+# 每日選股（快速測試，5 支股票）
+cd strategies/src
+python -c "
+import sys; sys.path.insert(0, '.')
+from scripts.run_daily_screener import main
+" --symbols AAPL,MSFT,NVDA --top-n 3
+
+# 或使用 CLI
+cd ../..
+python strategies/scripts/run_daily_screener.py --symbols AAPL,MSFT,NVDA --top-n 3
+```
+
+## 🔄 服務啟動與關閉
+
+### 開發環境
+
+```bash
+# 啟動所有服務
+docker-compose up -d
+
+# 查看服務狀態
+docker-compose ps
+
+# 查看日誌
+docker-compose logs -f                    # 所有服務
+docker-compose logs -f strategy_engine    # 策略引擎
+docker-compose logs -f web_dashboard      # Web 服務
+docker-compose logs -f db                 # 資料庫
+
+# 重啟單一服務
+docker-compose restart strategy_engine
+
+# 停止所有服務
+docker-compose down
+
+# 停止服務並清除數據卷
+docker-compose down -v
+```
+
+### 生產環境
+
+```bash
+# 啟動
+docker-compose -f prod.docker-compose.yml up -d
+
+# 停止
+docker-compose -f prod.docker-compose.yml down
+
+# 查看日誌
+docker-compose -f prod.docker-compose.yml logs -f
+```
+
+### 服務端口
+
+| 服務 | 開發端口 | 生產端口 | 說明 |
+|------|---------|---------|------|
+| Web Dashboard | 5000 | 5000 | Flask 應用 + LINE Webhook |
+| Strategy Engine | 5001 | — | 策略引擎 API (內部) |
+| MySQL | 3308 | — (不暴露) | 資料庫 |
+
+### 健康檢查
+
+```bash
+# Web Dashboard
+curl http://localhost:5000/health
+
+# API 端點
+curl http://localhost:5000/api/strategies
+curl http://localhost:5000/api/ml_status
+curl http://localhost:5000/api/recommendations
 ```
 
 ## 📝 更新日誌
 
-詳見 [updatelist.md](updatelist.md)
+詳見 [doc/updatelist.md](doc/updatelist.md)
 
 ## 🔒 安全說明
 

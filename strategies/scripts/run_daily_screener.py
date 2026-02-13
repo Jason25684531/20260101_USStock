@@ -10,7 +10,6 @@ Usage:
 """
 import argparse
 import sys
-import os
 from pathlib import Path
 from datetime import date
 
@@ -36,25 +35,29 @@ def print_report(recommendations, df_all):
 
     # Top N 推薦表
     print(f"\n🏆 Top {len(recommendations)} 推薦:")
-    print(f"{'─'*80}")
-    print(f"{'排名':>4} {'代碼':<8} {'價格':>10} {'評分':>6} "
+    print(f"{'─'*90}")
+    print(f"{'排名':>4} {'代碼':<8} {'價格':>10} {'評分':>6} {'信心度':>6} "
           f"{'突破':>4} {'加速':>4} {'PEG':>4} {'杜邦':>4} "
           f"{'支撐':>10} {'壓力':>10}")
-    print(f"{'─'*80}")
+    print(f"{'─'*90}")
 
     for rec in recommendations:
         s1 = rec.get('support_1')
         r1 = rec.get('resistance_1')
+        ml_c = rec.get('ml_confidence', 0)
+        ml_str = f"{ml_c:.0%}" if ml_c > 0 else "—"
+        s1_str = f"${s1:>8.2f}" if s1 else f"{'N/A':>10}"
+        r1_str = f"${r1:>8.2f}" if r1 else f"{'N/A':>10}"
         print(
             f"  #{rec['rank']:<3} {rec['symbol']:<8} "
             f"${rec['current_price']:>8.2f} "
             f"{rec['total_score']:>5.2f} "
+            f"{ml_str:>6} "
             f"{'✓' if rec['breakout_pass'] else '✗':>4} "
             f"{'✓' if rec['acceleration_pass'] else '✗':>4} "
             f"{'✓' if rec['peg_pass'] else '✗':>4} "
             f"{'✓' if rec['dupont_pass'] else '✗':>4} "
-            f"${s1:>8.2f} " if s1 else f"{'N/A':>10} "
-            f"${r1:>8.2f}" if r1 else f"{'N/A':>10}"
+            f"{s1_str} {r1_str}"
         )
 
     # 掃描統計
@@ -100,8 +103,9 @@ def main():
                         help='股票代碼 (逗號分隔), 預設 51 支美股')
     parser.add_argument('--top-n', type=int, default=5,
                         help='推薦數量 (預設 5)')
-    parser.add_argument('--use-ml', action='store_true',
-                        help='啟用 ML 信心度加權')
+    parser.add_argument('--use-ml', nargs='?', const=True, type=lambda x: x.lower() != 'false',
+                        default=None,
+                        help='ML 加權: true(強制啟用) / false(禁用) / 預設(自動偵測)')
     parser.add_argument('--save-db', action='store_true',
                         help='結果存入 DB')
     parser.add_argument('--notify', action='store_true',
@@ -119,7 +123,8 @@ def main():
     print(f"🚀 啟動每日選股系統")
     print(f"   股票池: {len(symbols)} 支")
     print(f"   Top-N: {args.top_n}")
-    print(f"   ML 加權: {'是' if args.use_ml else '否'}")
+    ml_status = '✅ 自動偵測' if args.use_ml is None else ('✅ 啟用' if args.use_ml else '❌ 禁用')
+    print(f"   ML 加權: {ml_status}")
     print(f"   存入 DB: {'是' if args.save_db else '否'}")
     print(f"   Line 通知: {'是' if args.notify else '否'}")
 
@@ -154,13 +159,19 @@ def main():
             try:
                 from adapters.notifier import get_notifier
                 notifier = get_notifier()
-                msg = screener.format_line_message(recommendations)
                 if notifier.is_enabled:
-                    notifier.send_text(msg)
-                    print("✅ Line 通知已發送")
+                    # 優先使用 Flex Message 推薦報告
+                    ok = notifier.send_flex_report(recommendations)
+                    if ok:
+                        print("✅ Line Flex 推薦報告已發送")
+                    else:
+                        # Flex 失敗時 fallback 為純文字
+                        msg = screener.format_line_message(recommendations)
+                        notifier.send_text(msg)
+                        print("✅ Line 純文字通知已發送 (Flex fallback)")
                 else:
                     print("⚠️  Line 未配置, 訊息如下:")
-                    print(msg)
+                    print(screener.format_line_message(recommendations))
             except Exception as e:
                 print(f"⚠️  Line 通知失敗: {e}")
 

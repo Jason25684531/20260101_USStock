@@ -1,13 +1,12 @@
 """
 Security utilities for the US Stock Trading System.
 
-This module provides secure secret management using environment variables.
-Environment variables are loaded from the .env file (docker-compose env_file directive).
-Falls back to Docker Secrets for backward compatibility.
+This module provides secure secret management using Docker Secrets first.
+Environment variables are used as a fallback for local development.
 
 Author: Quant System
 Created: 2025-12-31
-Updated: 2025-02-09 - Migrated to environment variables from Docker Secrets
+Updated: 2026-02-12 - Prefer Docker Secrets with env fallback
 """
 
 import os
@@ -24,8 +23,8 @@ def get_secret(secret_name: str, default: Optional[str] = None) -> Optional[str]
     Retrieve a secret value securely.
     
     Priority order:
-    1. Environment variable (from .env file) - PRIMARY METHOD
-    2. Docker Secrets (/run/secrets/<secret_name>) - for backward compatibility
+    1. Docker Secrets (/run/secrets/<secret_name>) - REQUIRED in production
+    2. Environment variable (from .env file) - fallback for local dev
     3. Default value (if provided)
     
     Args:
@@ -42,13 +41,8 @@ def get_secret(secret_name: str, default: Optional[str] = None) -> Optional[str]
     """
     # Normalize the secret name to uppercase for environment variable lookup
     env_var_name = secret_name.upper()
-    
-    # Priority 1: Environment variable (from .env file)
-    env_value = os.environ.get(env_var_name)
-    if env_value is not None:
-        return env_value
-    
-    # Priority 2: Docker Secrets (backward compatibility)
+
+    # Priority 1: Docker Secrets
     secret_file = SECRETS_PATH / secret_name
     if secret_file.exists():
         try:
@@ -56,6 +50,11 @@ def get_secret(secret_name: str, default: Optional[str] = None) -> Optional[str]
         except (IOError, PermissionError) as e:
             print(f"Warning: Could not read secret file {secret_file}: {e}")
     
+    # Priority 2: Environment variable (local dev fallback)
+    env_value = os.environ.get(env_var_name)
+    if env_value is not None:
+        return env_value
+
     # Priority 3: Default value
     if default is not None:
         return default

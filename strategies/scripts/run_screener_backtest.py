@@ -26,10 +26,7 @@ sys.path.insert(0, str(PROJECT_ROOT / 'strategies' / 'src'))
 from dotenv import load_dotenv
 load_dotenv(dotenv_path=PROJECT_ROOT / '.env')
 
-from strategies.momentum import screen_breakout, screen_acceleration
-from strategies.fundamental import screen_peg, screen_dupont
-from screener.support_resistance import calc_support_resistance
-from config import BACKTEST_SYMBOLS, calc_rule_score
+from config import BACKTEST_SYMBOLS, evaluate_stock_rules
 
 
 def fetch_all_history(symbols: List[str], start: str, end: str) -> Dict[str, pd.DataFrame]:
@@ -71,7 +68,7 @@ def evaluate_at_date(
     lookback: int = 250,
 ) -> Dict:
     """
-    在指定日期對股票進行策略評估
+    在指定日期對股票進行策略評估（使用共用 evaluate_stock_rules）
 
     Args:
         df_full: 完整歷史數據
@@ -86,24 +83,19 @@ def evaluate_at_date(
 
     current_price = float(df['Close'].iloc[-1])
 
-    r_breakout = screen_breakout(df)
-    r_accel = screen_acceleration(df, n=20)
-    r_peg = screen_peg(info)
-    r_dupont = screen_dupont(info)
-
-    rule_score = calc_rule_score(r_breakout, r_accel, r_peg, r_dupont)
-
-    passes = sum([r_breakout['pass'], r_accel['pass'], r_peg['pass'], r_dupont['pass']])
+    result = evaluate_stock_rules(df, info)
+    if result is None:
+        return None
 
     return {
         'symbol': symbol,
-        'total_score': round(rule_score, 2),
+        'total_score': result['rule_score'],
         'current_price': current_price,
-        'passes': passes,
-        'breakout_pass': r_breakout['pass'],
-        'acceleration_pass': r_accel['pass'],
-        'peg_pass': r_peg['pass'],
-        'dupont_pass': r_dupont['pass'],
+        'passes': result['passes'],
+        'breakout_pass': result['breakout']['pass'],
+        'acceleration_pass': result['acceleration']['pass'],
+        'peg_pass': result['peg']['pass'],
+        'dupont_pass': result['dupont']['pass'],
     }
 
 

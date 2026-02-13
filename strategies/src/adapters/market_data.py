@@ -263,19 +263,6 @@ def get_latest_price(symbol: str) -> Optional[float]:
     return None
 
 
-def fetch_current_price(symbol: str) -> Optional[float]:
-    """
-    Alias for get_latest_price for backward compatibility.
-    
-    Args:
-        symbol: Stock ticker symbol.
-        
-    Returns:
-        Latest closing price, or None if unavailable.
-    """
-    return get_latest_price(symbol)
-
-
 def fetch_macro_data(indicator: str = "GDP") -> Optional[pd.Series]:
     """
     獲取宏觀經濟數據 (FRED API).
