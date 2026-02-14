@@ -1,5 +1,114 @@
 # 更新日志
 
+## 2026-02-14 - 程式碼清洗與架構整合（Phase 2 深度清理）
+
+### 🧹 重複函式整合
+
+#### web 層: `_table_exists` / `_column_exists` 統一
+- **移動**: `web/app.py` 與 `web/bot/handler.py` 中各自定義的 `_table_exists()` / `_column_exists()` → 統一提取至 `web/db.py` 的 `table_exists()` / `column_exists()`
+- **影響**: `app.py` 改用 `from db import table_exists, column_exists` 別名引入; `handler.py` 直接 import
+- **效果**: 消除 2 處完全相同的 SQL 查詢（共 ~30 行重複碼）
+
+#### MFI / CMF 計算統一
+- **移動**: `ml/features.py` 中內嵌的 MFI (L370-378) / CMF (L380-385) 計算 → 委派至 `strategies/volume_analysis.py` 的 `calc_mfi()` / `calc_cmf()` / `calc_obv()`
+- **影響**: `features.py` 改用 `from strategies.volume_analysis import calc_mfi, calc_cmf, calc_obv`
+- **效果**: 資金流指標計算只保留一份權威實作
+
+#### evaluate_stock_rules v1 → v2 遷移
+- **更新**: `run_screener_backtest.py` 從 `evaluate_stock_rules` (v1) 升級為 `evaluate_stock_rules_v2`
+- **更新**: `screener/engine.py` 移除 v1 fallback（`evaluate_stock_rules` import 及降級邏輯）
+- **標記**: `config.py` 中 `evaluate_stock_rules()` 標記為 `[DEPRECATED]`
+- **效果**: 全系統統一使用 v2 Registry 架構，支援 11 策略動態註冊
+
+### 🗑️ 死碼移除
+
+| 刪除項目 | 原路徑 | 原因 |
+|---------|--------|------|
+| `data_cache.py` | `strategies/src/utils/data_cache.py` | **零引用** — 全專案無任何 import（140 行死碼） |
+| `logger.py` | `strategies/src/utils/logger.py` | **零引用** — 提供 `get_logger()` 但全系統使用 `print()`（104 行死碼） |
+| `utils/__init__.py` 清理 | `strategies/src/utils/__init__.py` | 移除 `logger` 相關 export |
+
+### 📂 檔案重組
+
+| 操作 | 原路徑 | 新路徑 | 原因 |
+|-----|--------|--------|------|
+| 移動 | `test_live_screening.py` | `strategies/tests/test_live_screening.py` | 根目錄散落測試腳本歸位 |
+| 移動 | `test_macro_and_sector.py` | `strategies/tests/test_macro_and_sector.py` | 同上 |
+| 移動 | `test_position_and_risk.py` | `strategies/tests/test_position_and_risk.py` | 同上 |
+
+### 🔧 程式碼品質修正
+
+| 修正項目 | 檔案 | 詳情 |
+|---------|------|------|
+| 移除 `load_dotenv` | `strategies/src/strategies/ml_strategy.py` | `load_dotenv` 只應在入口點 (main/scripts) 調用，非模組內部 |
+| 移除 `sys.path.insert` | `web/bot/handler.py` | 已改用正確的相對 import |
+| 統一 `import json` | `web/app.py` | 2 處 inline `import json as _json` → 頂層統一 `import json` |
+| 精簡 wrapper | `ml/features.py` | `calculate_rsi` wrapper 精簡為 1 行委派 + top-level import |
+| 精簡 wrapper | `core/backtest.py` | `calculate_atr` wrapper 精簡為 1 行委派 + top-level import |
+
+### 🧹 環境清理
+- **清除**: 全專案 `__pycache__/` 目錄（含 strategies、web、scripts 等）
+- **清除**: `.pytest_cache/` 根目錄快取
+- **確認**: `.gitignore` 已包含 `__pycache__/`、`*.pyc`、`.pytest_cache/` 規則
+
+### ✅ 全功能測試結果
+
+```
+py_compile: 41 檔全數通過（0 失敗）
+模組導入: 16/16 模組全部通過
+  ├── config (calc_rsi, calc_atr, calc_rule_score, evaluate_stock_rules_v2)
+  ├── utils.security, utils.db
+  ├── ml.features, ml.model
+  ├── strategies.momentum, fundamental, volume_analysis
+  ├── strategies.institutional, enhanced_momentum, earnings_quality, sector
+  ├── strategies.registry
+  ├── core.backtest (calculate_atr)
+  └── adapters.market_data
+
+共用函式測試:
+  ├── calc_rsi(20筆價格, period=14) → RSI=59.81 ✅
+  ├── calc_atr(30筆OHLC, period=14) → ATR=9.59 ✅
+  ├── calc_mfi(30筆, period=14) → MFI=53.29 ✅
+  └── calc_cmf(30筆, period=20) → CMF=0.59 ✅
+
+Web API 端點 (http://localhost:6688):
+  ├── /health → healthy ✅
+  ├── /webhook/info → active ✅
+  ├── /api/recommendations?limit=3 → ok(3) ✅
+  ├── /api/macro → ok ✅
+  ├── /api/sectors → ok ✅
+  ├── /api/ml_status → ok ✅
+  ├── /api/portfolio → ok ✅
+  ├── / (前端) → 200 (33KB) ✅
+  └── /callback (LINE Bot) → {"status":"ok"} ✅
+```
+
+### 📊 清理後架構變化
+
+| 指標 | 清理前 | 清理後 | 變化 |
+|-----|--------|--------|-----|
+| 重複函式定義 | 6 組 | 2 組 | -67% |
+| 死碼檔案 | 2 個 | 0 個 | -100% |
+| inline import | 2 處 | 0 處 | -100% |
+| 根目錄散落測試 | 3 個 | 0 個 | 已歸位 |
+| v1 callers | 2 處 | 0 處 | 全遷移至 v2 |
+
+> **保留但標註的設計決策**:
+> - `web/db.py` ↔ `strategies/src/utils/db.py` 微服務邊界保持獨立（Docker 隔離）
+> - `web/security.py` ↔ `strategies/src/utils/security.py` 同上
+> - `calculate_rsi()` / `calculate_atr()` wrapper 保留向後兼容介面（1 行委派）
+
+### 🔮 下一步預期發展
+
+1. **Enhanced Screener 寫入**: `screener/engine.py` 的 `save_to_db()` 擴展 INSERT 以寫入 7 個增強策略欄位 (institutional_pass, volume_structure_pass 等)
+2. **Script 統一 fetch**: 將 `run_ml_backtest_2024.py`、`run_screener_backtest.py`、`ingest_full_data.py` 的 fetch 函式委派至 `adapters/market_data.py`（需擴展 `start/end` 日期支援）
+3. **訓練腳本合併**: `train_model.py` + `train_local_model.py` 合併為單一腳本 `--mode db|local`
+4. **pytest 自動化**: 建立正式 `pytest` 測試套件（已有 5 個測試檔就位於 `strategies/tests/`）
+5. **CI/CD 流水線**: GitHub Actions 自動執行 `py_compile` + `pytest` + Docker build
+6. **Docker 端對端測試**: `docker-compose up` 全服務整合測試
+
+---
+
 ## 2026-02-13 - linebot-and-stability-pro（Phase 1 穩定化）
 
 ### 🔧 Port 統一清理

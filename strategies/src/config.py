@@ -111,6 +111,8 @@ def calc_rule_score(r_breakout: Dict, r_accel: Dict, r_peg: Dict, r_dupont: Dict
 
 def evaluate_stock_rules(df: pd.DataFrame, info: dict) -> Dict:
     """
+    [DEPRECATED] 請使用 evaluate_stock_rules_v2。
+
     對單支股票執行四策略評估（共用邏輯）。
 
     回傳結果包含 r_breakout / r_accel / r_peg / r_dupont + rule_score + passes。
@@ -146,3 +148,74 @@ def evaluate_stock_rules(df: pd.DataFrame, info: dict) -> Dict:
         'rule_score': round(rule_score, 2),
         'passes': passes,
     }
+
+
+def evaluate_stock_rules_v2(df: pd.DataFrame, info: dict, symbol: str = None) -> Dict:
+    """
+    v2 擴展版: 執行所有已註冊策略（含原始 4 策略 + 新增策略）。
+
+    透過 Strategy Registry 自動發現所有策略，不需手動逐一呼叫。
+    保持向後相容: 回傳中仍包含 breakout/acceleration/peg/dupont 的結構。
+
+    Args:
+        df: 含 OHLCV 的 DataFrame（至少 60 行）
+        info: yfinance ticker.info dict
+        symbol: 股票代碼（用於產業映射等）
+
+    Returns:
+        dict with keys:
+            - 所有策略名稱的結果
+            - rule_score: 綜合規則分
+            - passes: 通過的策略數
+            - all_results: {name: result} 完整結果
+        若數據不足回傳 None
+    """
+    from strategies.registry import evaluate_all_strategies, calc_composite_score
+
+    # 確保所有策略模組已被 import（觸發 Registry 註冊）
+    _import_all_strategies()
+
+    if df is None or len(df) < 60:
+        return None
+
+    all_results = evaluate_all_strategies(df, info)
+    rule_score = calc_composite_score(all_results)
+    passes = sum(1 for r in all_results.values() if r.get('pass'))
+
+    result = {
+        'rule_score': round(rule_score, 2),
+        'passes': passes,
+        'total_strategies': len(all_results),
+        'all_results': all_results,
+    }
+
+    # 向後相容: 保留舊欄位名稱
+    for name in ('breakout', 'acceleration', 'peg', 'dupont'):
+        if name in all_results:
+            result[name] = all_results[name]
+        else:
+            result[name] = {"pass": False, "score": 0.0, "details": "N/A"}
+
+    return result
+
+
+def _import_all_strategies():
+    """
+    匯入所有策略模組以觸發 Registry 自動註冊。
+    使用 try/except 確保個別模組失敗不影響整體。
+    """
+    modules = [
+        'strategies.momentum',
+        'strategies.fundamental',
+        'strategies.institutional',
+        'strategies.volume_analysis',
+        'strategies.enhanced_momentum',
+        'strategies.earnings_quality',
+        'strategies.sector',
+    ]
+    import importlib
+    for mod in modules:
+        try:
+            importlib.import_module(mod)
+        except ImportError:
+            pass

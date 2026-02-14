@@ -24,7 +24,7 @@ _SRC_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(_SRC_DIR))
 
 from screener.support_resistance import calc_support_resistance
-from config import DEFAULT_SYMBOLS, evaluate_stock_rules
+from config import DEFAULT_SYMBOLS, evaluate_stock_rules_v2
 
 
 class DailyScreener:
@@ -161,16 +161,19 @@ class DailyScreener:
         close_col = 'Close' if 'Close' in df.columns else 'close'
         current_price = float(df[close_col].iloc[-1])
 
-        # --- 4 個規則策略（使用共用函式）---
-        eval_result = evaluate_stock_rules(df, info)
+        # --- 全策略評估（v2 Registry 版本）---
+        eval_result = evaluate_stock_rules_v2(df, info, symbol=symbol)
         if eval_result is None:
             return None
-        r_breakout = eval_result['breakout']
-        r_accel = eval_result['acceleration']
-        r_peg = eval_result['peg']
-        r_dupont = eval_result['dupont']
+
+        r_breakout = eval_result.get('breakout', {"pass": False, "score": 0, "details": "N/A"})
+        r_accel = eval_result.get('acceleration', {"pass": False, "score": 0, "details": "N/A"})
+        r_peg = eval_result.get('peg', {"pass": False, "score": 0, "details": "N/A"})
+        r_dupont = eval_result.get('dupont', {"pass": False, "score": 0, "details": "N/A"})
         rule_score = eval_result['rule_score']
         passes = eval_result['passes']
+        total_strategies = eval_result.get('total_strategies', 4)
+        all_results = eval_result.get('all_results', {})
 
         # --- ML 信心度 (可選) ---
         ml_conf = 0.0
@@ -193,8 +196,10 @@ class DailyScreener:
         sr = calc_support_resistance(df)
 
         # --- 信號判定 ---
-        # BUY: 至少 2 個策略通過 或 總分 >= 2.0
-        signal_type = 'BUY' if passes >= 2 or total_score >= 2.0 else 'SELL'
+        # BUY: 至少 30% 策略通過 或 總分 >= 策略數的 20%
+        min_passes = max(2, total_strategies * 0.3)
+        min_score = max(2.0, total_strategies * 0.2)
+        signal_type = 'BUY' if passes >= min_passes or total_score >= min_score else 'SELL'
 
         return {
             'symbol': symbol,
@@ -213,6 +218,8 @@ class DailyScreener:
             'pb_ratio': info.get('priceToBook'),
             'roe': info.get('returnOnEquity'),
             'passes': passes,
+            'total_strategies': total_strategies,
+            'all_results': all_results,
         }
 
     # ----------------------------------------------------------

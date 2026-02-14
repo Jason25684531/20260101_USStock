@@ -4,7 +4,6 @@
 """
 import pandas as pd
 import numpy as np
-import vectorbt as vbt
 
 
 def run_value_strategy(
@@ -13,7 +12,7 @@ def run_value_strategy(
     pb_threshold: float = 1.5,
     initial_cash: float = 10000.0,
     rebalance_freq: str = '1M'
-) -> vbt.Portfolio:
+):
     """
     執行價值策略回測
     
@@ -49,19 +48,11 @@ def run_value_strategy(
     
     close = data['Close']
     
-    # 如果沒有 PE/PB 數據，使用模擬數據
+    # 如果沒有 PE/PB 數據，跳過（不再使用隨機模擬）
     if 'pe_ratio' not in data.columns or 'pb_ratio' not in data.columns:
-        print("⚠️  警告: 未找到基本面數據，使用模擬數據進行演示")
-        # 模擬一些合理的 PE/PB 值
-        np.random.seed(42)
-        pe_ratio = pd.Series(
-            np.random.uniform(10, 20, len(data)),
-            index=data.index
-        )
-        pb_ratio = pd.Series(
-            np.random.uniform(1, 2.5, len(data)),
-            index=data.index
-        )
+        print("⚠️  警告: 未找到基本面數據 (pe_ratio/pb_ratio)，策略將不會產生任何買入信號")
+        pe_ratio = pd.Series(999.0, index=data.index)
+        pb_ratio = pd.Series(999.0, index=data.index)
     else:
         pe_ratio = data['pe_ratio'].fillna(999)  # 填充缺失值為高值
         pb_ratio = data['pb_ratio'].fillna(999)
@@ -98,6 +89,8 @@ def run_value_strategy(
     print(f"   買入信號: {total_entries} 次")
     print(f"   賣出信號: {total_exits} 次")
     
+    import vectorbt as vbt  # lazy import — 僅回測時需要
+
     # 使用 VectorBT 進行回測
     portfolio = vbt.Portfolio.from_signals(
         close,

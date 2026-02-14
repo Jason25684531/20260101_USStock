@@ -9,6 +9,8 @@
 """
 from typing import Dict
 
+from strategies.registry import BaseScreenStrategy
+
 
 def screen_peg(info: dict) -> Dict:
     """
@@ -61,6 +63,16 @@ def screen_peg(info: dict) -> Dict:
         parts.append(f"PE:{pe:.1f}")
 
     return {"pass": passed, "score": round(score, 2), "details": " | ".join(parts)}
+
+
+class PEGStrategy(BaseScreenStrategy):
+    """Registry 版: PEG 選股策略"""
+    name = "peg"
+    description = "本益成長比 + ROE + 現金流"
+    category = "fundamental"
+
+    def screen(self, df, info: dict) -> Dict:
+        return screen_peg(info)
 
 
 def screen_dupont(info: dict) -> Dict:
@@ -120,3 +132,13 @@ def screen_dupont(info: dict) -> Dict:
         parts.append("資產周轉率:N/A")
 
     return {"pass": passed, "score": round(score, 2), "details": " | ".join(parts)}
+
+
+class DuPontStrategy(BaseScreenStrategy):
+    """Registry 版: 杜邦分析優質股策略"""
+    name = "dupont"
+    description = "ROE分解 + PB合理 + 資產周轉率"
+    category = "fundamental"
+
+    def screen(self, df, info: dict) -> Dict:
+        return screen_dupont(info)

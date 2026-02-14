@@ -26,7 +26,7 @@ sys.path.insert(0, str(PROJECT_ROOT / 'strategies' / 'src'))
 from dotenv import load_dotenv
 load_dotenv(dotenv_path=PROJECT_ROOT / '.env')
 
-from config import BACKTEST_SYMBOLS, evaluate_stock_rules
+from config import BACKTEST_SYMBOLS, evaluate_stock_rules_v2
 
 
 def fetch_all_history(symbols: List[str], start: str, end: str) -> Dict[str, pd.DataFrame]:
@@ -83,7 +83,7 @@ def evaluate_at_date(
 
     current_price = float(df['Close'].iloc[-1])
 
-    result = evaluate_stock_rules(df, info)
+    result = evaluate_stock_rules_v2(df, info, symbol=symbol)
     if result is None:
         return None
 
@@ -92,10 +92,11 @@ def evaluate_at_date(
         'total_score': result['rule_score'],
         'current_price': current_price,
         'passes': result['passes'],
-        'breakout_pass': result['breakout']['pass'],
-        'acceleration_pass': result['acceleration']['pass'],
-        'peg_pass': result['peg']['pass'],
-        'dupont_pass': result['dupont']['pass'],
+        'total_strategies': result.get('total_strategies', 4),
+        'breakout_pass': result.get('breakout', {}).get('pass', False),
+        'acceleration_pass': result.get('acceleration', {}).get('pass', False),
+        'peg_pass': result.get('peg', {}).get('pass', False),
+        'dupont_pass': result.get('dupont', {}).get('pass', False),
     }
 
 

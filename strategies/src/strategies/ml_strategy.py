@@ -8,13 +8,8 @@ from pathlib import Path
 from typing import Tuple
 import pandas as pd
 import numpy as np
-from dotenv import load_dotenv
 
-# 加載 .env 文件
-env_path = Path(__file__).parent.parent.parent.parent / '.env'
-load_dotenv(dotenv_path=env_path)
-
-# 添加路徑
+# 確保 src 目錄在搜索路徑中
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from adapters.database import DatabaseAdapter
 from adapters.market_data import fetch_data

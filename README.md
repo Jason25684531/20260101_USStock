@@ -29,7 +29,7 @@
 │  ┌──────────────┐    ┌───────────────┐    ┌───────────────┐    │
 │  │   MySQL 8.0   │    │   Strategy    │    │      Web      │    │
 │  │      db       │◄───│    Engine     │───►│   Dashboard   │    │
-│  │  (Port:3308)  │    │  (Port:5001)  │    │  (Port:5000)  │    │
+│  │  (Port:3308)  │    │  (Port:5001)  │    │  (Port:6688)  │    │
 │  └──────────────┘    └───────┬───────┘    └───────┬───────┘    │
 │                              │                     │            │
 │                              │     Push Signal     │            │
@@ -377,12 +377,16 @@ USStock/
 │   │   ├── ingest_full_data.py        # 歷史數據入庫
 │   │   └── train_local_model.py       # 本地模型訓練 (無 DB)
 │   └── tests/
-│       └── test_line_push.py          # LINE 推播測試
+│       ├── test_line_push.py          # LINE 推播測試
+│       ├── test_strategies.py         # 策略單元測試
+│       ├── test_live_screening.py     # 即時選股測試
+│       ├── test_macro_and_sector.py   # 宏觀/產業測試
+│       └── test_position_and_risk.py  # 部位/風控測試
 ├── web/                       # 🌐 Web Dashboard 服務
 │   ├── Dockerfile
 │   ├── requirements.txt
 │   ├── app.py                 # Flask 主應用 (Dashboard + API)
-│   ├── db.py                  # DB config + engine
+│   ├── db.py                  # DB config + engine + schema helpers
 │   ├── security.py            # Docker Secrets 管理
 │   ├── bot/
 │   │   ├── __init__.py        # Blueprint 導出
@@ -400,11 +404,15 @@ USStock/
 
 ```
 config.py (共用常量/函式)
-  ├── strategies/*.py        (calc_rsi, calc_atr, evaluate_stock_rules)
-  ├── ml/features.py         (calc_rsi → calculate_rsi 委派)
-  ├── core/backtest.py       (calc_atr → calculate_atr 委派)
-  ├── screener/engine.py     (calc_rule_score, evaluate_stock_rules)
+  ├── strategies/*.py        (calc_rsi, calc_atr, evaluate_stock_rules_v2)
+  ├── ml/features.py         (calc_rsi → calculate_rsi 保留向後兼容)
+  ├── core/backtest.py       (calc_atr → calculate_atr 保留向後兼容)
+  ├── screener/engine.py     (evaluate_stock_rules_v2, Registry 架構)
   └── scripts/*.py           (BACKTEST_SYMBOLS, DEFAULT_SYMBOLS)
+
+strategies/volume_analysis.py (資金流指標)
+  ├── ml/features.py         (calc_mfi, calc_cmf, calc_obv)
+  └── screener/engine.py     (screen_volume_structure)
 
 adapters/market_data.py
   ├── ml_strategy.py         (fetch_data)
@@ -412,7 +420,7 @@ adapters/market_data.py
   └── scripts/*.py           (fetch_data, fetch_multiple)
 
 adapters/database.py → utils/db.py → utils/security.py
-web/db.py → web/security.py
+web/db.py (含 table_exists / column_exists) → web/security.py
 ```
 
 ## 🧪 完整測試指南
@@ -435,118 +443,142 @@ pip install -r strategies/requirements.txt
 pip install -r web/requirements.txt
 ```
 
-### 1. 編譯檢查 (Syntax)
+### 1. 語法編譯檢查 (全模組一次檢查)
 
-```bash
-# 策略引擎 — 核心模組
-python -m py_compile strategies/src/config.py
-python -m py_compile strategies/src/main.py
-python -m py_compile strategies/src/adapters/database.py
-python -m py_compile strategies/src/adapters/market_data.py
-python -m py_compile strategies/src/adapters/broker.py
-python -m py_compile strategies/src/adapters/notifier.py
-python -m py_compile strategies/src/ml/features.py
-python -m py_compile strategies/src/ml/model.py
-python -m py_compile strategies/src/screener/engine.py
-python -m py_compile strategies/src/screener/support_resistance.py
-python -m py_compile strategies/src/strategies/momentum.py
-python -m py_compile strategies/src/strategies/fundamental.py
-python -m py_compile strategies/src/strategies/value.py
-python -m py_compile strategies/src/strategies/ml_strategy.py
-python -m py_compile strategies/src/core/backtest.py
-
-# Web 服務
-python -m py_compile web/app.py
-python -m py_compile web/db.py
-python -m py_compile web/security.py
-python -m py_compile web/bot/handler.py
-
-# 腳本
-python -m py_compile strategies/scripts/run_daily_screener.py
-python -m py_compile strategies/scripts/run_screener_backtest.py
-python -m py_compile strategies/scripts/train_local_model.py
-python -m py_compile strategies/scripts/run_ml_backtest_2024.py
-python -m py_compile strategies/scripts/ingest_full_data.py
+```powershell
+# PowerShell 批次檢查（41 個檔案）
+$files = @(
+  "strategies/src/config.py", "strategies/src/main.py",
+  "strategies/src/utils/__init__.py", "strategies/src/utils/security.py", "strategies/src/utils/db.py",
+  "strategies/src/adapters/__init__.py", "strategies/src/adapters/broker.py",
+  "strategies/src/adapters/database.py", "strategies/src/adapters/market_data.py",
+  "strategies/src/adapters/notifier.py",
+  "strategies/src/ml/__init__.py", "strategies/src/ml/features.py", "strategies/src/ml/model.py",
+  "strategies/src/core/__init__.py", "strategies/src/core/backtest.py",
+  "strategies/src/screener/__init__.py", "strategies/src/screener/engine.py",
+  "strategies/src/screener/support_resistance.py",
+  "strategies/src/strategies/__init__.py", "strategies/src/strategies/momentum.py",
+  "strategies/src/strategies/fundamental.py", "strategies/src/strategies/value.py",
+  "strategies/src/strategies/ml_strategy.py", "strategies/src/strategies/institutional.py",
+  "strategies/src/strategies/enhanced_momentum.py", "strategies/src/strategies/earnings_quality.py",
+  "strategies/src/strategies/volume_analysis.py", "strategies/src/strategies/macro_filter.py",
+  "strategies/src/strategies/sector.py", "strategies/src/strategies/registry.py",
+  "strategies/scripts/run_daily_screener.py", "strategies/scripts/run_ml_backtest_2024.py",
+  "strategies/scripts/run_screener_backtest.py", "strategies/scripts/train_local_model.py",
+  "strategies/scripts/ingest_full_data.py", "strategies/train_model.py",
+  "web/app.py", "web/db.py", "web/security.py", "web/bot/__init__.py", "web/bot/handler.py"
+)
+$ok=0; $fail=0
+foreach ($f in $files) {
+  python -m py_compile $f 2>&1 | Out-Null
+  if ($LASTEXITCODE -eq 0) { $ok++ } else { $fail++; Write-Host "FAIL: $f" }
+}
+Write-Host "py_compile: $ok passed, $fail failed"
 ```
 
 ### 2. 模組導入驗證
 
-```bash
-# 策略引擎模組（需在 strategies/src/ 目錄下執行）
-cd strategies/src
-python -c "from config import DEFAULT_SYMBOLS, BACKTEST_SYMBOLS, calc_rsi, calc_atr, calc_rule_score; print('config OK')"
-python -c "from utils.security import get_secret; print('security OK')"
-python -c "from utils.db import get_db_config, get_engine; print('db OK')"
-python -c "from adapters.database import DatabaseAdapter; print('DatabaseAdapter OK')"
-python -c "from adapters.market_data import fetch_data, fetch_multiple, get_latest_price; print('market_data OK')"
-python -c "from ml.features import make_features, get_feature_columns; print('features OK')"
-python -c "from ml.model import StrategyModel; print('model OK')"
-python -c "from screener.engine import DailyScreener; print('screener OK')"
-python -c "from strategies.momentum import run_momentum_strategy; print('momentum OK')"
-python -c "from core.backtest import run_sma_strategy, calculate_atr; print('backtest OK')"
-cd ../..
+```powershell
+# 策略引擎全模組
+$env:PYTHONPATH="strategies/src"
+python -c "
+import sys; sys.path.insert(0, 'strategies/src')
+from config import calc_rsi, calc_atr, evaluate_stock_rules_v2, DEFAULT_SYMBOLS
+from utils.security import get_secret, require_secret, is_production
+from utils.db import get_db_config, build_connection_string, get_engine
+from ml.features import calculate_rsi, make_features, get_feature_columns
+from ml.model import StrategyModel
+from strategies.momentum import screen_breakout, screen_acceleration
+from strategies.fundamental import screen_peg, screen_dupont
+from strategies.volume_analysis import calc_mfi, calc_cmf, calc_obv
+from strategies.institutional import screen_institutional
+from strategies.enhanced_momentum import screen_multi_tf_momentum, screen_relative_strength
+from strategies.earnings_quality import screen_earnings_quality
+from strategies.sector import screen_sector_rotation
+from strategies.registry import evaluate_all_strategies, calc_composite_score
+from core.backtest import calculate_atr
+from adapters.market_data import fetch_data, fetch_fundamentals
+print('ALL 16 modules imported OK')
+"
 
-# Web 模組（需在 web/ 目錄下執行）
-cd web
-python -c "from security import get_secret; print('web security OK')"
-python -c "from db import get_db_config; print('web db OK')"
-cd ..
+# Web 模組
+python -c "
+import sys; sys.path.insert(0, 'web')
+from security import get_secret, is_production
+from db import get_db_config, get_engine, table_exists, column_exists
+print('Web modules OK')
+"
 ```
 
-### 3. 功能測試
+### 3. 共用函式功能測試 (不需 DB)
 
-```bash
-# 共用函式測試（不需 DB）
-cd strategies/src
+```powershell
 python -c "
+import sys; sys.path.insert(0, 'strategies/src')
 import pandas as pd, numpy as np
 from config import calc_rsi, calc_atr, calc_rule_score
+from strategies.volume_analysis import calc_mfi, calc_cmf
+
 prices = pd.Series([100+i*0.5 for i in range(30)])
 print(f'RSI: {calc_rsi(prices).iloc[-1]:.2f}')
+
 df = pd.DataFrame({'High': prices+2, 'Low': prices-2, 'Close': prices})
 print(f'ATR: {calc_atr(df).iloc[-1]:.4f}')
+
 score = calc_rule_score(
   {'pass':True,'score':1},{'pass':False,'score':0.6},
   {'pass':True,'score':1},{'pass':False,'score':0.3})
 print(f'Rule Score: {score}')
-print('ALL TESTS PASSED')
-"
-cd ../..
 
-# Anti-Bias 參數驗證
-cd strategies/src
-python -c "
-from adapters.database import DatabaseAdapter
-import inspect
-sig = inspect.signature(DatabaseAdapter.get_fundamental_data)
-assert 'as_of_date' in sig.parameters
-print('Anti-Bias: as_of_date parameter OK')
-from strategies.ml_strategy import MLStrategy
-sig2 = inspect.signature(MLStrategy._get_fundamental_data)
-assert 'as_of_date' in sig2.parameters
-print('MLStrategy: as_of_date parameter OK')
-print('ALL ANTI-BIAS TESTS PASSED')
+h = pd.Series(np.random.uniform(150,160,30))
+l = pd.Series(np.random.uniform(140,150,30))
+c = pd.Series(np.random.uniform(145,155,30))
+v = pd.Series(np.random.uniform(1e6,5e6,30))
+print(f'MFI: {calc_mfi(h,l,c,v).iloc[-1]:.2f}')
+print(f'CMF: {calc_cmf(h,l,c,v).iloc[-1]:.4f}')
+print('ALL FUNCTION TESTS PASSED')
 "
-cd ../..
-
-# LINE Bot 測試
-$env:PYTHONIOENCODING='utf-8'
-python strategies/tests/test_line_push.py
 ```
 
-### 4. 線上功能測試 (需 Docker 啟動)
+### 4. Web API 端點測試 (需啟動 app)
 
-```bash
-# 每日選股（快速測試，5 支股票）
-cd strategies/src
-python -c "
-import sys; sys.path.insert(0, '.')
-from scripts.run_daily_screener import main
-" --symbols AAPL,MSFT,NVDA --top-n 3
+```powershell
+# 啟動 Web App
+$env:WEB_PORT='6688'
+python web/app.py  # 或用 docker-compose up -d
 
-# 或使用 CLI
-cd ../..
-python strategies/scripts/run_daily_screener.py --symbols AAPL,MSFT,NVDA --top-n 3
+# 測試 API (另開 terminal)
+$auth = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('admin:admin123'))
+$h = @{Authorization="Basic $auth"}
+
+Invoke-RestMethod -Uri 'http://localhost:6688/health' -Headers $h
+Invoke-RestMethod -Uri 'http://localhost:6688/webhook/info' -Headers $h
+Invoke-RestMethod -Uri 'http://localhost:6688/api/recommendations?limit=3' -Headers $h
+Invoke-RestMethod -Uri 'http://localhost:6688/api/macro' -Headers $h
+Invoke-RestMethod -Uri 'http://localhost:6688/api/sectors' -Headers $h
+Invoke-RestMethod -Uri 'http://localhost:6688/api/ml_status' -Headers $h
+Invoke-RestMethod -Uri 'http://localhost:6688/api/portfolio' -Headers $h
+```
+
+### 5. 每日選股測試
+
+```powershell
+# 掃描 5 支股票，輸出 Top 3（不需 DB）
+python strategies/scripts/run_daily_screener.py --symbols AAPL,MSFT,NVDA,GOOGL,META --top-n 3
+
+# 掃描並寫入 DB
+python strategies/scripts/run_daily_screener.py --save-db --top-n 5
+```
+
+### 6. LINE Bot 測試
+
+```powershell
+# 推播功能測試
+python strategies/tests/test_line_push.py
+
+# Webhook 端點測試
+Invoke-RestMethod -Uri 'http://localhost:6688/callback' -Method Post `
+  -ContentType 'application/json' -Body '{"events":[]}'
 ```
 
 ## 🔄 服務啟動與關閉

@@ -6,21 +6,11 @@ import numpy as np
 import pandas as pd
 from typing import Optional
 
+from config import calc_rsi
+
 
 def calculate_rsi(prices: pd.Series, period: int = 14) -> pd.Series:
-    """
-    計算相對強弱指標 (RSI)
-
-    委派至 config.calc_rsi 統一實作。
-
-    Args:
-        prices: 收盤價序列
-        period: 計算週期，默認14天
-
-    Returns:
-        RSI 值序列 (0-100)
-    """
-    from config import calc_rsi
+    """計算 RSI — 委派至 config.calc_rsi（保留向後兼容介面）。"""
     return calc_rsi(prices, period)
 
 
@@ -328,6 +318,59 @@ def make_features(
         vol_col = 'Volume' if 'Volume' in df.columns else 'volume'
         df['Volume_Price_Trend'] = calculate_volume_price_trend(df['Close'], df[vol_col], period=10)
         df['Volume_Price_Trend'] = df['Volume_Price_Trend'].ffill().fillna(0)
+    
+    # ===== 2.6 擴充動能 Alpha 特徵 (v2 升級) =====
+    
+    # 多時間框架動能
+    df['Momentum_5'] = calculate_momentum(df['Close'], period=5)
+    df['Momentum_63'] = calculate_momentum(df['Close'], period=63)
+    if len(df) >= 253:
+        df['Momentum_252'] = calculate_momentum(df['Close'], period=252)
+    else:
+        df['Momentum_252'] = 0.0
+    
+    # 動能加速度: 20 日動能的 20 日變化
+    df['Momentum_Acceleration'] = df['Momentum_20'].diff(periods=20) if 'Momentum_20' in df.columns else 0.0
+    df['Momentum_Acceleration'] = df['Momentum_Acceleration'].fillna(0)
+    
+    # 新高頻率: 過去 60 日中 >= 20 日新高的比例
+    rolling_high_20 = df['Close'].rolling(20).max()
+    new_high_flag = (df['Close'] >= rolling_high_20 * 0.99).astype(float)
+    df['New_High_Freq_60'] = new_high_flag.rolling(60).mean().fillna(0)
+    
+    # 均線排列分數: SMA20>SMA50 +1, SMA50>SMA120 +1, SMA120>SMA200 +1 → 0~3
+    sma20 = df['Close'].rolling(20).mean()
+    sma50 = df['Close'].rolling(50).mean()
+    sma120 = df['Close'].rolling(120).mean()
+    sma200 = df['Close'].rolling(200).mean()
+    df['MA_Alignment'] = (
+        (sma20 > sma50).astype(float) +
+        (sma50 > sma120).astype(float) +
+        (sma120 > sma200).astype(float)
+    )
+    df['MA_Alignment'] = df['MA_Alignment'].fillna(0)
+    
+    # ===== 2.7 資金流特徵 (v2 升級) =====
+    if 'Volume' in df.columns or 'volume' in df.columns:
+        vol_col = 'Volume' if 'Volume' in df.columns else 'volume'
+        high_col = df['High'] if 'High' in df.columns else df.get('high')
+        low_col = df['Low'] if 'Low' in df.columns else df.get('low')
+        
+        if high_col is not None and low_col is not None:
+            from strategies.volume_analysis import calc_mfi, calc_cmf, calc_obv
+
+            # MFI (Money Flow Index) — 委派至 volume_analysis 共用實作
+            df['MFI_14'] = calc_mfi(high_col, low_col, df['Close'], df[vol_col], period=14)
+
+            # CMF (Chaikin Money Flow) — 委派至 volume_analysis 共用實作
+            df['CMF_20'] = calc_cmf(high_col, low_col, df['Close'], df[vol_col], period=20)
+
+            # OBV 趨勢斜率 (10 日) — 委派 OBV 計算至 volume_analysis
+            obv = calc_obv(df['Close'], df[vol_col])
+            df['OBV_Slope_10'] = obv.rolling(10).apply(
+                lambda x: np.polyfit(np.arange(len(x)), x, 1)[0] if len(x) == 10 else 0,
+                raw=True
+            ).fillna(0)
     
     # ===== 3. 基本面特徵（高Alpha因子） =====
     

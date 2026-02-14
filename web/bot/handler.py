@@ -20,10 +20,8 @@ from datetime import datetime
 from flask import Blueprint, request, abort, jsonify
 from functools import wraps
 
-import sys
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from security import get_secret
-from db import get_engine
+from db import get_engine, table_exists as _table_exists, column_exists as _column_exists
 
 # ============================================
 # Blueprint & Secrets
@@ -137,9 +135,12 @@ def handle_follow_event(event: dict):
         "🎉 歡迎使用美股量化交易系統！\n\n"
         "可用命令：\n"
         "🏆 Top5 — 選股推薦（含 ML 加權）\n"
-        "📊 Top5基礎 — 純規則推薦（無 ML）\n"
-        "🤖 ML AAPL — 查詢 ML 預測\n"
-        "📈 /strategies — 查看策略說明\n"
+        "📊 Top5基礎 — 純規則推薦\n"
+        "🔍 /stock AAPL — 個股分析\n"
+        "🌍 /market — 宏觀環境\n"
+        "📅 /history — 歷史推薦\n"
+        "🏭 /sector — 產業動能\n"
+        "🤖 ML AAPL — ML 預測\n"
         "❓ /help — 完整幫助\n\n"
         "系統每日自動推送選股報告。"
     )
@@ -175,48 +176,445 @@ def process_command(text: str) -> Optional[List[dict]]:
             return _cmd_ml(parts[1].upper())
         return [_text_msg("請指定股票代碼，例如: ML AAPL")]
 
-    # --- Status ---
+    # --- /stock SYMBOL: 個股 11 策略詳細分析 ---
+    if cmd.startswith(('/stock ', '個股 ', '查股 ')):
+        parts = text.strip().split()
+        if len(parts) >= 2:
+            return _cmd_stock(parts[1].upper())
+        return [_text_msg("請指定股票代碼，例如: /stock AAPL")]
+
+    # --- /market: 宏觀環境 ---
+    if cmd in ('/market', '市場', '宏觀', '/macro'):
+        return _cmd_market()
+
+    # --- /history MMDD: 歷史推薦 ---
+    if cmd.startswith(('/history', '歷史')):
+        parts = text.strip().split()
+        date_str = parts[1] if len(parts) >= 2 else None
+        return _cmd_history(date_str)
+
+    # --- /sector: 產業動能 ---
+    if cmd in ('/sector', '產業', '板塊', '/sectors'):
+        return _cmd_sector()
+
+    # --- Status (real health check) ---
     if cmd in ('/status', '狀態'):
-        return [_text_msg(
-            "🟢 系統運行正常\n\n"
-            "📊 策略引擎: 運行中\n"
-            "💾 數據庫: 已連接\n"
-            f"📈 最後更新: {datetime.now().strftime('%H:%M:%S')}"
-        )]
+        return _cmd_status()
 
     # --- Help ---
     if cmd in ('/help', '幫助'):
         return [_text_msg(
             "📚 可用命令：\n\n"
-            "🏆 Top5 — 今日選股推薦（含 ML 加權）\n"
-            "📊 Top5基礎 — 純規則推薦（無 ML）\n"
-            "🤖 ML [代碼] — 查詢 ML 預測 (如: ML AAPL)\n"
-            "📈 /status — 系統狀態\n"
-            "🎯 /strategies — 查看策略說明\n"
+            "🏆 Top5 — 今日選股推薦（含 ML）\n"
+            "📊 Top5基礎 — 純規則推薦\n"
+            "🔍 /stock AAPL — 個股詳細分析\n"
+            "🌍 /market — 宏觀環境\n"
+            "📅 /history 0214 — 歷史推薦\n"
+            "🏭 /sector — 產業動能排行\n"
+            "🤖 ML AAPL — ML 預測\n"
+            "📈 /status — 即時系統狀態\n"
+            "🎯 /strategies — 策略說明\n"
             "❓ /help — 顯示此幫助\n\n"
-            "💡 系統每日自動推送選股報告"
+            "💡 點擊 Top5 推薦下方按鈕快速查股"
         )]
 
     # --- Strategies ---
     if cmd in ('/strategies', '策略'):
         return [_text_msg(
-            "📈 選股策略版本：\n\n"
-            "🏆 Top5（完整版）\n"
-            "  • 4 規則策略 + ML 信心度加權\n"
-            "  • 評分 = 規則分 × (ML信心度/0.5)\n\n"
-            "📊 Top5基礎（純規則版）\n"
-            "  • 僅 4 規則策略評分\n"
-            "  • 無 ML 加權\n\n"
-            "📋 策略明細：\n"
-            "  1️⃣ Breakout — 200日新高 + RSI>60\n"
-            "  2️⃣ Acceleration — 均速曲率上升\n"
+            "📈 選股策略 v2（11 策略 + ML）：\n\n"
+            "📋 規則策略（11 項）:\n"
+            "  1️⃣ Breakout — 200日新高突破\n"
+            "  2️⃣ Acceleration — 均速曲率加速\n"
             "  3️⃣ PEG — PEG<1.5 + ROE>10%\n"
-            "  4️⃣ DuPont — ROE>5% + PB<8\n"
-            "  5️⃣ ML (XGBoost) — 18 技術特徵"
+            "  4️⃣ DuPont — 杜邦分解品質\n"
+            "  5️⃣ Institutional — 機構籌碼\n"
+            "  6️⃣ Volume Structure — 量價結構\n"
+            "  7️⃣ Money Flow — 資金流向\n"
+            "  8️⃣ Multi-TF Momentum — 多週期動能\n"
+            "  9️⃣ Relative Strength — 相對強度\n"
+            "  🔟 Earnings Quality — 盈餘品質\n"
+            "  1️⃣1️⃣ Sector Rotation — 產業輪動\n\n"
+            "🤖 ML (XGBoost) — 信心度加權\n"
+            "📊 評分 = 規則通過數 × ML加權"
         )]
 
     # 非命令消息
     return None
+
+
+# ============================================
+# /stock SYMBOL: 個股 11 策略分析
+# ============================================
+def _cmd_stock(symbol: str) -> List[dict]:
+    """查詢個股的 11 策略通過/不通過 + 基本面 + ML"""
+    try:
+        from sqlalchemy import text as sql_text
+        engine = _get_db_engine()
+
+        with engine.connect() as conn:
+            row = conn.execute(sql_text("""
+                SELECT symbol, scan_date, signal_type, total_score,
+                       current_price, ml_confidence,
+                       breakout_pass, acceleration_pass, peg_pass, dupont_pass,
+                       institutional_pass, volume_structure_pass, money_flow_pass,
+                       multi_tf_momentum_pass, relative_strength_pass,
+                       earnings_quality_pass, sector_rotation_pass,
+                       total_strategies, support_1, resistance_1, macro_regime
+                FROM daily_recommendations
+                WHERE symbol = :sym
+                ORDER BY scan_date DESC LIMIT 1
+            """), {'sym': symbol}).first()
+
+            if not row:
+                return [_text_msg(f"❌ 找不到 {symbol} 的推薦資料")]
+
+            strat_names = [
+                ('突破', row[6]), ('加速', row[7]), ('PEG', row[8]), ('杜邦', row[9]),
+                ('籌碼', row[10]), ('量價', row[11]), ('資金流', row[12]),
+                ('多TF', row[13]), ('RS', row[14]), ('盈餘', row[15]), ('產業', row[16]),
+            ]
+            passed = [name for name, v in strat_names if v]
+            failed = [name for name, v in strat_names if not v]
+            total = row[17] or len(strat_names)
+            ml_conf = float(row[5]) if row[5] else 0
+            ml_str = f"{ml_conf:.0%}" if ml_conf > 0 else "—"
+            s1 = f"${float(row[18]):.2f}" if row[18] else "N/A"
+            r1 = f"${float(row[19]):.2f}" if row[19] else "N/A"
+            regime = row[20] or "N/A"
+
+            msg = (
+                f"🔍 {row[0]} 詳細分析\n"
+                f"📅 {row[1]} | {row[2]} | 評分 {float(row[3]):.1f}\n"
+                f"💰 ${float(row[4]):.2f} | 支撐 {s1} | 壓力 {r1}\n"
+                f"🌍 Regime: {regime}\n\n"
+                f"✅ 通過 ({len(passed)}/{total}):\n"
+                f"  {' | '.join(passed) if passed else '無'}\n\n"
+                f"❌ 未通過:\n"
+                f"  {' | '.join(failed) if failed else '全通過 🎉'}\n\n"
+                f"🤖 ML 信心度: {ml_str}"
+            )
+
+            # 查基本面
+            fund_row = conn.execute(sql_text("""
+                SELECT pe_ratio, peg_ratio, pb_ratio, roe, profit_margin, sector
+                FROM stock_fundamentals
+                WHERE symbol = :sym
+                ORDER BY updated_at DESC LIMIT 1
+            """), {'sym': symbol}).first()
+
+            if fund_row:
+                pe = f"{float(fund_row[0]):.1f}" if fund_row[0] else "-"
+                peg = f"{float(fund_row[1]):.2f}" if fund_row[1] else "-"
+                pb = f"{float(fund_row[2]):.1f}" if fund_row[2] else "-"
+                roe = f"{float(fund_row[3])*100:.1f}%" if fund_row[3] else "-"
+                margin = f"{float(fund_row[4])*100:.1f}%" if fund_row[4] else "-"
+                sector = fund_row[5] or "-"
+                msg += (
+                    f"\n\n📈 基本面:\n"
+                    f"  PE {pe} | PEG {peg} | PB {pb}\n"
+                    f"  ROE {roe} | 淨利率 {margin}\n"
+                    f"  產業: {sector}"
+                )
+
+            return [_text_msg(msg)]
+
+    except Exception as e:
+        print(f"❌ /stock 查詢失敗: {e}")
+        return [_text_msg(f"❌ 查詢 {symbol} 失敗: {e}")]
+
+
+# ============================================
+# /market: 宏觀環境
+# ============================================
+def _cmd_market() -> List[dict]:
+    """查詢宏觀環境 (Regime + FRED 指標)"""
+    try:
+        from sqlalchemy import text as sql_text
+        engine = _get_db_engine()
+
+        with engine.connect() as conn:
+            # Regime
+            reg = None
+            if _table_exists(conn, 'macro_regime_log'):
+                reg = conn.execute(sql_text("""
+                    SELECT regime, description, report_date
+                    FROM macro_regime_log
+                    ORDER BY report_date DESC LIMIT 1
+                """)).first()
+
+            regime_str = "UNKNOWN"
+            regime_emoji = "⚪"
+            regime_desc = ""
+            regime_date = ""
+            if reg:
+                regime_str = reg[0] or "UNKNOWN"
+                regime_desc = reg[1] or ""
+                regime_date = str(reg[2]) if reg[2] else ""
+                regime_emoji = {"RISK_ON": "🟢", "NEUTRAL": "🟡", "RISK_OFF": "🔴"}.get(regime_str, "⚪")
+
+            # FRED indicators
+            indicators = {}
+            if _table_exists(conn, 'macro_data'):
+                if _column_exists(conn, 'macro_data', 'indicator'):
+                    code_col = 'indicator'
+                elif _column_exists(conn, 'macro_data', 'ticker'):
+                    code_col = 'ticker'
+                else:
+                    code_col = None
+
+                code_alias_map = {
+                    'VIX': ['VIX', 'VIXCLS'],
+                    'T10Y2Y': ['T10Y2Y'],
+                    'UNRATE': ['UNRATE'],
+                    'DFF': ['DFF'],
+                    'CPIAUCSL': ['CPIAUCSL', 'CPI'],
+                }
+
+                if code_col:
+                    for indicator in ['VIX', 'T10Y2Y', 'UNRATE', 'DFF', 'CPIAUCSL']:
+                        r = None
+                        for alias in code_alias_map.get(indicator, [indicator]):
+                            r = conn.execute(sql_text(f"""
+                                SELECT value FROM macro_data
+                                WHERE {code_col} = :ind
+                                ORDER BY date DESC LIMIT 1
+                            """), {'ind': alias}).first()
+                            if r:
+                                break
+                        if r:
+                            indicators[indicator] = float(r[0])
+
+            vix = indicators.get('VIX')
+            vix_str = f"{vix:.1f}" if vix else "-"
+            vix_emoji = "🟢" if vix and vix < 20 else "🟡" if vix and vix < 30 else "🔴"
+
+            yield_curve = indicators.get('T10Y2Y')
+            yc_str = f"{yield_curve:.2f}" if yield_curve is not None else "-"
+
+            unrate = indicators.get('UNRATE')
+            ur_str = f"{unrate:.1f}%" if unrate else "-"
+
+            fed = indicators.get('DFF')
+            fed_str = f"{fed:.2f}%" if fed else "-"
+
+            if regime_str == "UNKNOWN" and indicators:
+                if yield_curve is not None and yield_curve < 0:
+                    regime_str = "RISK_OFF"
+                    regime_emoji = "🔴"
+                    regime_desc = "Fallback: 殖利率倒掛，偏防禦"
+                elif yield_curve is not None and yield_curve > 0.3 and (fed is None or fed < 5.0):
+                    regime_str = "RISK_ON"
+                    regime_emoji = "🟢"
+                    regime_desc = "Fallback: 曲線正向且利率中性，偏風險資產"
+                else:
+                    regime_str = "NEUTRAL"
+                    regime_emoji = "🟡"
+                    regime_desc = "Fallback: 宏觀信號中性"
+
+            msg = (
+                f"🌍 宏觀環境報告\n"
+                f"{'='*24}\n\n"
+                f"{regime_emoji} Regime: {regime_str}\n"
+                f"  {regime_desc}\n"
+                f"  📅 {regime_date}\n\n"
+                f"📊 關鍵指標:\n"
+                f"  {vix_emoji} VIX: {vix_str}\n"
+                f"  📈 殖利率曲線: {yc_str}\n"
+                f"  👷 失業率: {ur_str}\n"
+                f"  🏦 Fed 利率: {fed_str}\n\n"
+                f"💡 Regime 影響選股加權:\n"
+                f"  🟢 RISK_ON = 積極進場\n"
+                f"  🟡 NEUTRAL = 正常配置\n"
+                f"  🔴 RISK_OFF = 保守防禦"
+            )
+            return [_text_msg(msg)]
+
+    except Exception as e:
+        print(f"❌ /market 查詢失敗: {e}")
+        return [_text_msg(f"❌ 宏觀資料查詢失敗: {e}")]
+
+
+# ============================================
+# /history MMDD: 歷史推薦
+# ============================================
+def _cmd_history(date_str: Optional[str] = None) -> List[dict]:
+    """查詢歷史推薦日期列表或指定日期的推薦"""
+    try:
+        from sqlalchemy import text as sql_text
+        engine = _get_db_engine()
+
+        with engine.connect() as conn:
+            if date_str:
+                # Parse MMDD or YYYYMMDD
+                now = datetime.now()
+                if len(date_str) == 4:
+                    target = f"{now.year}-{date_str[:2]}-{date_str[2:]}"
+                elif len(date_str) == 8:
+                    target = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:]}"
+                else:
+                    target = date_str  # assume YYYY-MM-DD
+
+                rows = conn.execute(sql_text("""
+                    SELECT symbol, rank_position, signal_type, total_score, ml_confidence
+                    FROM daily_recommendations
+                    WHERE scan_date = :d
+                    ORDER BY rank_position ASC LIMIT 10
+                """), {'d': target})
+
+                recs = [r for r in rows]
+                if not recs:
+                    return [_text_msg(f"📅 {target} 無推薦資料")]
+
+                lines = [f"📅 {target} 推薦:", ""]
+                for r in recs:
+                    ml = f"{float(r[4])*100:.0f}%" if r[4] else "—"
+                    lines.append(f"  #{r[1]} {r[0]} | {r[2]} | 分:{float(r[3]):.1f} | ML:{ml}")
+
+                return [_text_msg("\n".join(lines))]
+            else:
+                # List recent dates
+                dates = conn.execute(sql_text("""
+                    SELECT DISTINCT scan_date FROM daily_recommendations
+                    ORDER BY scan_date DESC LIMIT 10
+                """))
+                date_list = [str(r[0]) for r in dates]
+
+                if not date_list:
+                    return [_text_msg("📅 尚無歷史推薦資料")]
+
+                msg = "📅 歷史推薦日期:\n\n"
+                for d in date_list:
+                    msg += f"  • {d}\n"
+                msg += "\n💡 輸入 /history 0214 查看特定日期"
+                return [_text_msg(msg)]
+
+    except Exception as e:
+        print(f"❌ /history 查詢失敗: {e}")
+        return [_text_msg(f"❌ 歷史推薦查詢失敗: {e}")]
+
+
+# ============================================
+# /sector: 產業動能排行
+# ============================================
+def _cmd_sector() -> List[dict]:
+    """查詢產業動能排行"""
+    try:
+        from sqlalchemy import text as sql_text
+        engine = _get_db_engine()
+
+        with engine.connect() as conn:
+            sectors = []
+
+            if _table_exists(conn, 'sector_momentum'):
+                etf_col = 'etf' if _column_exists(conn, 'sector_momentum', 'etf') else 'etf_symbol'
+                rows = conn.execute(sql_text(f"""
+                    SELECT sector, {etf_col}, rank_position, return_20d, return_63d
+                    FROM sector_momentum
+                    WHERE report_date = (SELECT MAX(report_date) FROM sector_momentum)
+                    ORDER BY rank_position ASC
+                """))
+                sectors = [r for r in rows]
+
+            # fallback: 若無 sector_momentum，用 daily_recommendations 聚合
+            if not sectors and _table_exists(conn, 'daily_recommendations'):
+                if _column_exists(conn, 'daily_recommendations', 'sector'):
+                    rows = conn.execute(sql_text("""
+                        SELECT COALESCE(sector, 'Unknown') AS sector_name,
+                               COUNT(*) AS stock_count,
+                               AVG(total_score) AS avg_score
+                        FROM daily_recommendations
+                        WHERE scan_date = (SELECT MAX(scan_date) FROM daily_recommendations)
+                        GROUP BY COALESCE(sector, 'Unknown')
+                        ORDER BY avg_score DESC, stock_count DESC
+                    """))
+                    rank = 1
+                    for row in rows:
+                        sectors.append((row[0], 'N/A', rank, None, None))
+                        rank += 1
+                else:
+                    rows = conn.execute(sql_text("""
+                        SELECT symbol, total_score
+                        FROM daily_recommendations
+                        WHERE scan_date = (SELECT MAX(scan_date) FROM daily_recommendations)
+                    """))
+                    sector_map = {
+                        'AAPL': 'Technology', 'MSFT': 'Technology', 'NVDA': 'Technology', 'AMD': 'Technology',
+                        'GOOGL': 'Communication', 'META': 'Communication', 'NFLX': 'Communication',
+                        'AMZN': 'Consumer Discretionary', 'TSLA': 'Consumer Discretionary',
+                        'JPM': 'Financials', 'BAC': 'Financials', 'V': 'Financials', 'MA': 'Financials',
+                        'LLY': 'Healthcare', 'UNH': 'Healthcare', 'JNJ': 'Healthcare',
+                        'XOM': 'Energy', 'CVX': 'Energy',
+                    }
+                    agg = {}
+                    for row in rows:
+                        sector_name = sector_map.get(row[0], 'Other')
+                        agg[sector_name] = agg.get(sector_name, 0) + 1
+                    sorted_items = sorted(agg.items(), key=lambda item: item[1], reverse=True)
+                    rank = 1
+                    for sector_name, _count in sorted_items:
+                        sectors.append((sector_name, 'N/A', rank, None, None))
+                        rank += 1
+
+            if not sectors:
+                return [_text_msg("🏭 尚無產業動能資料")]
+
+            lines = ["🏭 產業動能排行", "=" * 24, ""]
+            for s in sectors:
+                r20 = f"{float(s[3])*100:.1f}%" if s[3] else "-"
+                r63 = f"{float(s[4])*100:.1f}%" if s[4] else "-"
+                arrow = "📈" if s[3] and float(s[3]) > 0 else "📉"
+                lines.append(f"  #{s[2]} {arrow} {s[0]} ({s[1]})")
+                lines.append(f"     20日: {r20} | 63日: {r63}")
+
+            lines.append("\n💡 輸入 /stock SYMBOL 查看個股")
+            return [_text_msg("\n".join(lines))]
+
+    except Exception as e:
+        print(f"❌ /sector 查詢失敗: {e}")
+        return [_text_msg(f"❌ 產業動能查詢失敗: {e}")]
+
+
+# ============================================
+# /status: 即時系統健康檢查
+# ============================================
+def _cmd_status() -> List[dict]:
+    """即時健康檢查，回報 DB、API、ML"""
+    try:
+        from sqlalchemy import text as sql_text
+        engine = _get_db_engine()
+
+        db_ok = False
+        latest_rec = "N/A"
+        rec_count = 0
+        try:
+            with engine.connect() as conn:
+                conn.execute(sql_text("SELECT 1"))
+                db_ok = True
+                r = conn.execute(sql_text(
+                    "SELECT MAX(scan_date), COUNT(*) FROM daily_recommendations"
+                )).first()
+                if r:
+                    latest_rec = str(r[0]) if r[0] else "N/A"
+                    rec_count = r[1] or 0
+        except Exception:
+            pass
+
+        db_emoji = "🟢" if db_ok else "🔴"
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+        msg = (
+            f"📊 系統狀態報告\n"
+            f"{'='*24}\n\n"
+            f"{db_emoji} 資料庫: {'已連接' if db_ok else '斷線'}\n"
+            f"📈 最新推薦: {latest_rec}\n"
+            f"📋 總推薦數: {rec_count:,}\n"
+            f"🤖 策略引擎: v2 (11策略+ML)\n"
+            f"⏰ 查詢時間: {now}"
+        )
+        return [_text_msg(msg)]
+
+    except Exception as e:
+        return [_text_msg(f"❌ 狀態查詢失敗: {e}")]
 
 
 # ============================================
@@ -271,7 +669,15 @@ def _cmd_top5() -> List[dict]:
             if not recs:
                 return [_text_msg("📊 該日期無推薦資料")]
 
-            return [_build_top5_flex(recs, str(latest))]
+            # Build Flex message + Quick Reply for individual stock lookup
+            flex = _build_top5_flex(recs, str(latest))
+            quick_items = [
+                {"type": "action", "action": {"type": "message", "label": f"🔍{r['symbol']}", "text": f"/stock {r['symbol']}"}}
+                for r in recs[:5]
+            ]
+            quick_items.append({"type": "action", "action": {"type": "message", "label": "🌍 宏觀", "text": "/market"}})
+            flex["quickReply"] = {"items": quick_items}
+            return [flex]
 
     except Exception as e:
         print(f"❌ Top5 查詢失敗: {e}")
@@ -360,13 +766,16 @@ def _cmd_ml(symbol: str) -> List[dict]:
 
         with engine.connect() as conn:
             # 優先查 trade_logs（含 confidence + top_features）
-            row = conn.execute(sql_text("""
-                SELECT symbol, entry_date, entry_price, confidence, top_features
-                FROM trade_logs
-                WHERE symbol = :sym AND confidence IS NOT NULL
-                ORDER BY entry_date DESC, id DESC
-                LIMIT 1
-            """), {'sym': symbol}).first()
+            row = None
+            if _table_exists(conn, 'trade_logs') and _column_exists(conn, 'trade_logs', 'confidence'):
+                top_col = 'top_features' if _column_exists(conn, 'trade_logs', 'top_features') else 'NULL AS top_features'
+                row = conn.execute(sql_text(f"""
+                    SELECT symbol, entry_date, entry_price, confidence, {top_col}
+                    FROM trade_logs
+                    WHERE symbol = :sym AND confidence IS NOT NULL
+                    ORDER BY entry_date DESC, id DESC
+                    LIMIT 1
+                """), {'sym': symbol}).first()
 
             if row:
                 conf = float(row[3]) if row[3] else 0

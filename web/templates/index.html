@@ -3,537 +3,717 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>美股交易策略儀表板</title>
-    
-    <!-- Bootstrap CSS -->
+    <title>美股 AI 量化交易系統</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    
-    <!-- Chart.js -->
+    <link href="/static/style.css" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-    
-    <style>
-        body {
-            background-color: #f8f9fa;
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-        }
-        
-        .navbar {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        }
-        
-        .card {
-            border: none;
-            border-radius: 10px;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-            margin-bottom: 20px;
-        }
-        
-        .card-header {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            font-weight: 600;
-            border-radius: 10px 10px 0 0 !important;
-        }
-        
-        .stat-card {
-            text-align: center;
-            padding: 20px;
-        }
-        
-        .stat-value {
-            font-size: 2rem;
-            font-weight: bold;
-            margin: 10px 0;
-        }
-        
-        .stat-label {
-            color: #6c757d;
-            font-size: 0.9rem;
-        }
-        
-        .positive {
-            color: #28a745;
-        }
-        
-        .negative {
-            color: #dc3545;
-        }
-        
-        #chartCanvas {
-            max-height: 400px;
-        }
-        
-        .strategy-item {
-            cursor: pointer;
-            transition: background-color 0.2s;
-        }
-        
-        .strategy-item:hover {
-            background-color: #f0f0f0;
-        }
-        
-        .strategy-item.active {
-            background-color: #e7f1ff;
-            border-left: 3px solid #667eea;
-        }
-        
-        .loading {
-            text-align: center;
-            padding: 40px;
-            color: #6c757d;
-        }
-    </style>
 </head>
 <body>
-    <!-- 導航欄 -->
-    <nav class="navbar navbar-dark mb-4">
-        <div class="container-fluid">
-            <span class="navbar-brand mb-0 h1">
-                📈 美股交易策略儀表板
-            </span>
-            <span class="text-white">
-                <small id="lastUpdate">載入中...</small>
-            </span>
-        </div>
-    </nav>
 
+<!-- ========== Navbar ========== -->
+<nav class="navbar navbar-dark navbar-main mb-0 py-2">
     <div class="container-fluid">
-        <div class="row">
-            <!-- 左側：策略列表 -->
-            <div class="col-md-3">
-                <div class="card">
-                    <div class="card-header">
-                        策略列表
-                    </div>
-                    <div class="card-body p-0">
-                        <div id="strategyList" class="list-group list-group-flush">
-                            <div class="loading">
-                                <div class="spinner-border text-primary" role="status">
-                                    <span class="visually-hidden">載入中...</span>
-                                </div>
-                                <p class="mt-2">載入策略數據...</p>
-                            </div>
-                        </div>
+        <span class="navbar-brand mb-0 h1">📈 美股 AI 量化交易系統</span>
+        <span class="text-white-50 small" id="lastUpdate">載入中...</span>
+    </div>
+</nav>
+
+<!-- ========== Tab Navigation ========== -->
+<div class="bg-white border-bottom sticky-top">
+    <div class="container-fluid">
+        <ul class="nav nav-tabs border-0" id="mainTabs" role="tablist">
+            <li class="nav-item"><a class="nav-link active" data-bs-toggle="tab" href="#tab-rec" role="tab">🏆 推薦</a></li>
+            <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-portfolio" role="tab">💼 持倉</a></li>
+            <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-backtest" role="tab">📊 回測</a></li>
+            <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-macro" role="tab">🌍 宏觀</a></li>
+            <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-settings" role="tab">⚙️ 設定</a></li>
+        </ul>
+    </div>
+</div>
+
+<!-- ========== Tab Content ========== -->
+<div class="container-fluid mt-3">
+<div class="tab-content" id="mainTabContent">
+
+<!-- ======================== TAB: 推薦 ======================== -->
+<div class="tab-pane fade show active" id="tab-rec" role="tabpanel">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <h5 class="mb-0">🏆 每日選股推薦</h5>
+        <div class="d-flex align-items-center gap-2">
+            <select id="recDateSelect" class="form-select form-select-sm" style="width:180px;" onchange="loadRecommendations()">
+                <option value="">最新</option>
+            </select>
+            <button class="btn btn-sm btn-outline-primary" onclick="loadRecommendations()">🔄</button>
+        </div>
+    </div>
+    <div class="card">
+        <div class="card-body p-0">
+            <div class="table-responsive">
+                <table class="table table-sm table-striped table-hover mb-0">
+                    <thead class="table-light">
+                        <tr>
+                            <th>#</th><th>股票</th><th>信號</th><th>評分</th>
+                            <th>突破</th><th>加速</th><th>PEG</th><th>杜邦</th>
+                            <th>籌碼</th><th>量價</th><th>資金流</th><th>多 TF</th>
+                            <th>RS</th><th>盈餘</th><th>產業</th>
+                            <th>ML</th><th>現價</th><th>支撐</th><th>壓力</th>
+                        </tr>
+                    </thead>
+                    <tbody id="recBody">
+                        <tr><td colspan="19" class="text-center text-muted py-4">載入中...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+    <!-- 歷史推薦統計 -->
+    <div class="card mt-3">
+        <div class="card-header card-header-pink">📅 歷史推薦紀錄</div>
+        <div class="card-body">
+            <div class="table-responsive">
+                <table class="table table-sm table-hover mb-0" id="historyTable">
+                    <thead class="table-light">
+                        <tr><th>日期</th><th>Top1</th><th>Top2</th><th>Top3</th><th>Top4</th><th>Top5</th></tr>
+                    </thead>
+                    <tbody id="historyBody">
+                        <tr><td colspan="6" class="text-center text-muted">載入中...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ======================== TAB: 持倉 ======================== -->
+<div class="tab-pane fade" id="tab-portfolio" role="tabpanel">
+    <h5 class="mb-3">💼 AI 持倉追蹤</h5>
+    <div class="row">
+        <div class="col-lg-8">
+            <div class="card">
+                <div class="card-header card-header-green">持倉明細</div>
+                <div class="card-body p-0">
+                    <div class="table-responsive">
+                        <table class="table table-sm table-striped mb-0">
+                            <thead class="table-light">
+                                <tr><th>股票</th><th>進場日</th><th>進場價</th><th>出場日</th><th>出場價</th><th>損益</th><th>ML信心</th></tr>
+                            </thead>
+                            <tbody id="portfolioBody">
+                                <tr><td colspan="7" class="text-center text-muted py-4">載入中...</td></tr>
+                            </tbody>
+                        </table>
                     </div>
                 </div>
             </div>
+        </div>
+        <div class="col-lg-4">
+            <div class="card">
+                <div class="card-header card-header-primary">產業分佈</div>
+                <div class="card-body">
+                    <canvas id="sectorPieChart" height="260"></canvas>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
 
-            <!-- 右側：圖表和統計 -->
-            <div class="col-md-9">
-                <!-- 績效統計卡片 -->
-                <div class="row" id="statsCards">
-                    <div class="col-md-3">
-                        <div class="card stat-card">
-                            <div class="stat-label">總回報</div>
-                            <div class="stat-value" id="totalReturn">-</div>
-                        </div>
-                    </div>
-                    <div class="col-md-3">
-                        <div class="card stat-card">
-                            <div class="stat-label">夏普比率</div>
-                            <div class="stat-value" id="sharpeRatio">-</div>
-                        </div>
-                    </div>
-                    <div class="col-md-3">
-                        <div class="card stat-card">
-                            <div class="stat-label">最大回撤</div>
-                            <div class="stat-value" id="maxDrawdown">-</div>
-                        </div>
-                    </div>
-                    <div class="col-md-3">
-                        <div class="card stat-card">
-                            <div class="stat-label">策略名稱</div>
-                            <div class="stat-value" style="font-size: 1.2rem;" id="strategyName">-</div>
-                        </div>
+<!-- ======================== TAB: 回測 ======================== -->
+<div class="tab-pane fade" id="tab-backtest" role="tabpanel">
+    <h5 class="mb-3">📊 回測績效</h5>
+    <div class="row">
+        <!-- 左：回測列表 -->
+        <div class="col-md-3">
+            <div class="card">
+                <div class="card-header card-header-primary">回測歷史</div>
+                <div class="card-body p-0">
+                    <div id="backtestList" class="list-group list-group-flush">
+                        <div class="loading"><div class="spinner-border spinner-border-sm text-primary"></div> 載入中...</div>
                     </div>
                 </div>
-
-                <!-- 權益曲線圖表 -->
-                <div class="card">
-                    <div class="card-header">
-                        權益曲線
-                    </div>
-                    <div class="card-body">
-                        <canvas id="chartCanvas"></canvas>
-                    </div>
-                </div>
-
-                <!-- ML Model Confidence Panel -->
-                <div class="card" id="mlStatusCard">
-                    <div class="card-header" style="background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);">
-                        🤖 ML 模型狀態 &amp; 信心度
-                    </div>
-                    <div class="card-body">
-                        <div class="row mb-3">
-                            <div class="col-md-6">
-                                <h6>模型特徵重要性 (Top 10)</h6>
-                                <ul id="featureImportanceList" class="list-group list-group-flush small">
-                                    <li class="list-group-item text-muted">載入中...</li>
-                                </ul>
-                            </div>
-                            <div class="col-md-6">
-                                <h6>最近 ML 信號 (含置信度)</h6>
-                                <div class="table-responsive">
-                                    <table class="table table-sm table-striped">
-                                        <thead><tr><th>股票</th><th>日期</th><th>置信度</th></tr></thead>
-                                        <tbody id="mlSignalsBody">
-                                            <tr><td colspan="3" class="text-muted">載入中...</td></tr>
-                                        </tbody>
-                                    </table>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- 每日選股推薦 -->
-                <div class="card" id="recommendationsCard">
-                    <div class="card-header" style="background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);">
-                        🏆 每日選股推薦 (Top 5)
-                    </div>
-                    <div class="card-body">
-                        <div class="d-flex justify-content-between align-items-center mb-3">
-                            <div>
-                                <label class="me-2 small">日期:</label>
-                                <input type="date" id="recDate" class="form-control form-control-sm d-inline-block" style="width:160px;">
-                            </div>
-                            <button class="btn btn-sm btn-outline-primary" onclick="loadRecommendations()">🔄 重新載入</button>
-                        </div>
-                        <div class="table-responsive">
-                            <table class="table table-sm table-striped table-hover">
-                                <thead>
-                                    <tr>
-                                        <th>#</th>
-                                        <th>股票</th>
-                                        <th>信號</th>
-                                        <th>總分</th>
-                                        <th>突破</th>
-                                        <th>加速</th>
-                                        <th>PEG</th>
-                                        <th>杜邦</th>
-                                        <th>ML</th>
-                                        <th>現價</th>
-                                        <th>支撐1</th>
-                                        <th>壓力1</th>
-                                    </tr>
-                                </thead>
-                                <tbody id="recBody">
-                                    <tr><td colspan="12" class="text-center text-muted">載入中...</td></tr>
-                                </tbody>
-                            </table>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- 交易記錄表格 -->
-                <div class="card">
-                    <div class="card-header">
-                        交易記錄
-                    </div>
-                    <div class="card-body">
-                        <div class="table-responsive">
-                            <table class="table table-striped table-hover" id="tradesTable">
-                                <thead>
-                                    <tr>
-                                        <th>股票代碼</th>
-                                        <th>入場日期</th>
-                                        <th>出場日期</th>
-                                        <th>入場價格</th>
-                                        <th>出場價格</th>
-                                        <th>損益</th>
-                                    </tr>
-                                </thead>
-                                <tbody id="tradesBody">
-                                    <tr>
-                                        <td colspan="6" class="text-center text-muted">請選擇一個策略</td>
-                                    </tr>
-                                </tbody>
-                            </table>
-                        </div>
+            </div>
+        </div>
+        <!-- 右：績效詳情 -->
+        <div class="col-md-9">
+            <div class="row mb-3" id="btStatsCards">
+                <div class="col-3"><div class="card stat-card"><div class="stat-label">總回報</div><div class="stat-value" id="btReturn">-</div></div></div>
+                <div class="col-3"><div class="card stat-card"><div class="stat-label">夏普比率</div><div class="stat-value" id="btSharpe">-</div></div></div>
+                <div class="col-3"><div class="card stat-card"><div class="stat-label">最大回撤</div><div class="stat-value" id="btDrawdown">-</div></div></div>
+                <div class="col-3"><div class="card stat-card"><div class="stat-label">策略名稱</div><div class="stat-value" id="btName" style="font-size:1rem;">-</div></div></div>
+            </div>
+            <div class="card">
+                <div class="card-header card-header-blue">權益曲線</div>
+                <div class="card-body"><canvas id="equityChart"></canvas></div>
+            </div>
+            <div class="card mt-3">
+                <div class="card-header card-header-dark">交易記錄</div>
+                <div class="card-body p-0">
+                    <div class="table-responsive">
+                        <table class="table table-sm table-striped mb-0">
+                            <thead class="table-light">
+                                <tr><th>股票</th><th>入場日</th><th>出場日</th><th>入場價</th><th>出場價</th><th>損益</th></tr>
+                            </thead>
+                            <tbody id="btTradesBody">
+                                <tr><td colspan="6" class="text-center text-muted">選擇左側回測</td></tr>
+                            </tbody>
+                        </table>
                     </div>
                 </div>
             </div>
         </div>
     </div>
+</div>
 
-    <!-- Bootstrap JS -->
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-    
-    <script>
-        let currentChart = null;
-        let strategies = [];
-
-        // 頁面載入時初始化
-        document.addEventListener('DOMContentLoaded', function() {
-            loadStrategies();
-            loadMLStatus();
-            // 初始化推薦日期為今天
-            document.getElementById('recDate').value = new Date().toISOString().slice(0, 10);
-            loadRecommendations();
-        });
-
-        // 載入策略列表
-        async function loadStrategies() {
-            try {
-                const response = await fetch('/api/strategies');
-                strategies = await response.json();
-                
-                const listContainer = document.getElementById('strategyList');
-                
-                if (strategies.length === 0) {
-                    listContainer.innerHTML = '<div class="p-3 text-center text-muted">尚無策略數據</div>';
-                    return;
-                }
-                
-                listContainer.innerHTML = strategies.map(strategy => `
-                    <div class="list-group-item strategy-item" onclick="selectStrategy(${strategy.id})">
-                        <div class="d-flex w-100 justify-content-between">
-                            <h6 class="mb-1">${strategy.strategy_name}</h6>
-                            <small class="${strategy.total_return >= 0 ? 'positive' : 'negative'}">
-                                ${(strategy.total_return * 100).toFixed(2)}%
-                            </small>
-                        </div>
-                        <small class="text-muted">${strategy.start_date} ~ ${strategy.end_date}</small>
+<!-- ======================== TAB: 宏觀 ======================== -->
+<div class="tab-pane fade" id="tab-macro" role="tabpanel">
+    <h5 class="mb-3">🌍 宏觀環境與產業動能</h5>
+    <!-- Regime 指示 -->
+    <div class="card mb-3">
+        <div class="card-header card-header-orange">市場環境 (Regime)</div>
+        <div class="card-body">
+            <div class="row align-items-center">
+                <div class="col-auto">
+                    <span id="regimeDot" class="regime-dot regime-neutral"></span>
+                    <strong id="regimeLabel" class="fs-5">載入中...</strong>
+                </div>
+                <div class="col"><span id="regimeDesc" class="text-muted"></span></div>
+                <div class="col-auto"><small class="text-muted" id="regimeDate"></small></div>
+            </div>
+        </div>
+    </div>
+    <!-- 指標卡 -->
+    <div class="row mb-3" id="macroCards">
+        <div class="col-md-3 col-6"><div class="card stat-card"><div class="stat-label">VIX 恐慌指數</div><div class="stat-value" id="macroVix">-</div></div></div>
+        <div class="col-md-3 col-6"><div class="card stat-card"><div class="stat-label">殖利率曲線 (10Y-2Y)</div><div class="stat-value" id="macroYield">-</div></div></div>
+        <div class="col-md-3 col-6"><div class="card stat-card"><div class="stat-label">失業率</div><div class="stat-value" id="macroUnemploy">-</div></div></div>
+        <div class="col-md-3 col-6"><div class="card stat-card"><div class="stat-label">Fed 利率</div><div class="stat-value" id="macroFed">-</div></div></div>
+    </div>
+    <!-- 產業熱力圖 -->
+    <div class="card">
+        <div class="card-header card-header-primary">🏭 產業動能排行</div>
+        <div class="card-body p-0">
+            <div class="table-responsive">
+                <table class="table table-sm heatmap-table mb-0">
+                    <thead class="table-light">
+                        <tr><th>排名</th><th>產業</th><th>ETF</th><th>20 日</th><th>63 日</th><th>252 日</th></tr>
+                    </thead>
+                    <tbody id="sectorBody">
+                        <tr><td colspan="6" class="text-center text-muted py-3">載入中...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+    <!-- ML 模型 -->
+    <div class="card mt-3">
+        <div class="card-header card-header-green">🤖 ML 模型狀態</div>
+        <div class="card-body">
+            <div class="row">
+                <div class="col-md-5">
+                    <h6>特徵重要性 Top 10</h6>
+                    <ul id="featureList" class="list-group list-group-flush small">
+                        <li class="list-group-item text-muted">載入中...</li>
+                    </ul>
+                </div>
+                <div class="col-md-7">
+                    <h6>最近 ML 信號</h6>
+                    <div class="table-responsive">
+                        <table class="table table-sm table-striped">
+                            <thead><tr><th>股票</th><th>日期</th><th>價格</th><th>信心度</th></tr></thead>
+                            <tbody id="mlBody"><tr><td colspan="4" class="text-muted">載入中...</td></tr></tbody>
+                        </table>
                     </div>
-                `).join('');
-                
-                // 自動選擇第一個策略
-                if (strategies.length > 0) {
-                    selectStrategy(strategies[0].id);
-                }
-                
-                document.getElementById('lastUpdate').textContent = 
-                    `最後更新: ${new Date().toLocaleString('zh-TW')}`;
-                
-            } catch (error) {
-                console.error('載入策略失敗:', error);
-                document.getElementById('strategyList').innerHTML = 
-                    '<div class="p-3 text-danger">載入失敗，請檢查後端服務</div>';
-            }
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ======================== TAB: 設定 ======================== -->
+<div class="tab-pane fade" id="tab-settings" role="tabpanel">
+    <h5 class="mb-3">⚙️ 系統資訊</h5>
+    <div class="card">
+        <div class="card-body">
+            <table class="table table-sm">
+                <tr><th style="width:200px">系統狀態</th><td id="sysHealth" class="positive">檢測中...</td></tr>
+                <tr><th>資料庫連線</th><td id="sysDb">-</td></tr>
+                <tr><th>LINE Bot</th><td id="sysLine">-</td></tr>
+                <tr><th>最新推薦日期</th><td id="sysLatestRec">-</td></tr>
+                <tr><th>策略引擎版本</th><td>v2 — 11 策略 Registry + ML</td></tr>
+                <tr><th>ML 模型</th><td id="sysMl">-</td></tr>
+            </table>
+        </div>
+    </div>
+</div>
+
+</div><!-- /tab-content -->
+</div><!-- /container -->
+
+<!-- ========== Stock Detail Modal ========== -->
+<div class="modal fade" id="stockModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header" style="background:var(--primary-gradient);color:#fff;">
+                <h5 class="modal-title" id="stockModalTitle">個股分析</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body" id="stockModalBody">
+                <div class="loading"><div class="spinner-border text-primary"></div></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+// ============================================
+// Global state
+// ============================================
+let equityChart = null;
+let sectorPieChart = null;
+let strategies = [];
+
+document.addEventListener('DOMContentLoaded', () => {
+    loadRecDates();
+    loadRecommendations();
+    loadPortfolio();
+    loadBacktestList();
+    loadMacro();
+    loadSectors();
+    loadMLStatus();
+    loadSystemInfo();
+    document.getElementById('lastUpdate').textContent = '最後更新: ' + new Date().toLocaleString('zh-TW');
+});
+
+// Auto-refresh
+setInterval(() => { loadRecommendations(); loadPortfolio(); }, 60000);
+setInterval(() => { loadMacro(); loadMLStatus(); }, 120000);
+
+// ============================================
+// Helpers
+// ============================================
+const pass = v => v === null || v === undefined
+    ? '<span class="badge-na">-</span>'
+    : (v ? '<span class="badge-pass">✓</span>' : '<span class="badge-fail">✗</span>');
+const fmt = (v, d=2) => v != null ? Number(v).toFixed(d) : '-';
+const pct = (v, d=1) => v != null ? (Number(v)*100).toFixed(d)+'%' : '-';
+const dollar = v => v != null ? '$'+Number(v).toFixed(2) : '-';
+
+function heatColor(val) {
+    if (val == null) return '';
+    const v = Number(val) * 100;
+    if (v > 5) return 'background:#c8e6c9;color:#1b5e20';
+    if (v > 2) return 'background:#e8f5e9;color:#2e7d32';
+    if (v > 0) return 'background:#f1f8e9;color:#33691e';
+    if (v > -2) return 'background:#fff3e0;color:#e65100';
+    if (v > -5) return 'background:#ffebee;color:#c62828';
+    return 'background:#ef9a9a;color:#b71c1c';
+}
+
+// ============================================
+// Recommendations
+// ============================================
+async function loadRecDates() {
+    try {
+        const resp = await fetch('/api/recommendations/dates');
+        const data = await resp.json();
+        const sel = document.getElementById('recDateSelect');
+        sel.innerHTML = '<option value="">最新</option>';
+        (data.dates || []).forEach(d => {
+            sel.innerHTML += `<option value="${d}">${d}</option>`;
+        });
+        // Load history sidebar
+        loadHistory(data.dates || []);
+    } catch(e) { console.error(e); }
+}
+
+async function loadRecommendations() {
+    try {
+        const dateVal = document.getElementById('recDateSelect').value;
+        let url = '/api/recommendations?limit=10';
+        if (dateVal) url += '&date=' + dateVal;
+        const resp = await fetch(url);
+        const data = await resp.json();
+        const tbody = document.getElementById('recBody');
+        const recs = data.recommendations || data || [];
+
+        if (!recs.length) {
+            tbody.innerHTML = '<tr><td colspan="19" class="text-center text-muted py-4">該日無推薦</td></tr>';
+            return;
         }
 
-        // 選擇策略
-        async function selectStrategy(runId) {
-            // 更新選中狀態
-            document.querySelectorAll('.strategy-item').forEach(item => {
-                item.classList.remove('active');
-            });
-            event.currentTarget?.classList.add('active');
-            
-            // 找到對應的策略數據
-            const strategy = strategies.find(s => s.id === runId);
-            if (strategy) {
-                updateStats(strategy);
-            }
-            
-            // 載入權益曲線
-            await loadEquityCurve(runId);
-            
-            // 載入交易記錄
-            await loadTrades(runId);
+        tbody.innerHTML = recs.map(r => {
+            const sigClass = r.signal === 'BUY' ? 'positive' : 'negative';
+            const ml = r.ml_confidence != null ? pct(r.ml_confidence, 0) : '-';
+            return `<tr class="clickable-row" onclick="openStockModal('${r.symbol}')">
+                <td><strong>${r.rank}</strong></td>
+                <td><strong>${r.symbol}</strong></td>
+                <td class="${sigClass}">${r.signal || '-'}</td>
+                <td>${fmt(r.total_score)}</td>
+                <td>${pass(r.breakout_pass)}</td>
+                <td>${pass(r.acceleration_pass)}</td>
+                <td>${pass(r.peg_pass)}</td>
+                <td>${pass(r.dupont_pass)}</td>
+                <td>${pass(r.institutional_pass)}</td>
+                <td>${pass(r.volume_structure_pass)}</td>
+                <td>${pass(r.money_flow_pass)}</td>
+                <td>${pass(r.multi_tf_momentum_pass)}</td>
+                <td>${pass(r.relative_strength_pass)}</td>
+                <td>${pass(r.earnings_quality_pass)}</td>
+                <td>${pass(r.sector_rotation_pass)}</td>
+                <td>${ml}</td>
+                <td>${dollar(r.current_price)}</td>
+                <td>${dollar(r.support_1)}</td>
+                <td>${dollar(r.resistance_1)}</td>
+            </tr>`;
+        }).join('');
+    } catch(e) {
+        console.error(e);
+        document.getElementById('recBody').innerHTML = '<tr><td colspan="19" class="text-center text-danger">載入失敗</td></tr>';
+    }
+}
+
+async function loadHistory(dates) {
+    const tbody = document.getElementById('historyBody');
+    if (!dates || dates.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted">無歷史資料</td></tr>';
+        return;
+    }
+    const rows = [];
+    for (const d of dates.slice(0, 10)) {
+        try {
+            const resp = await fetch(`/api/recommendations?date=${d}&limit=5`);
+            const data = await resp.json();
+            const recs = data.recommendations || data || [];
+            const syms = recs.map(r => r.symbol || '-');
+            while (syms.length < 5) syms.push('-');
+            rows.push(`<tr><td>${d}</td>${syms.map(s => `<td>${s}</td>`).join('')}</tr>`);
+        } catch(e) { rows.push(`<tr><td>${d}</td><td colspan="5">載入失敗</td></tr>`); }
+    }
+    tbody.innerHTML = rows.join('');
+}
+
+// ============================================
+// Stock Detail Modal
+// ============================================
+async function openStockModal(symbol) {
+    const modal = new bootstrap.Modal(document.getElementById('stockModal'));
+    document.getElementById('stockModalTitle').textContent = `📊 ${symbol} 詳細分析`;
+    document.getElementById('stockModalBody').innerHTML = '<div class="text-center py-5"><div class="spinner-border text-primary"></div></div>';
+    modal.show();
+
+    try {
+        const resp = await fetch(`/api/stock/${symbol}`);
+        const d = await resp.json();
+        if (d.error) { document.getElementById('stockModalBody').innerHTML = `<p class="text-danger">${d.error}</p>`; return; }
+
+        const strats = d.strategies || {};
+        const fund = d.fundamentals || {};
+        const price = d.price || {};
+        const stratNames = {
+            breakout:'突破', acceleration:'加速', peg:'PEG', dupont:'杜邦',
+            institutional:'籌碼', volume_structure:'量價', money_flow:'資金流',
+            multi_tf_momentum:'多TF', relative_strength:'RS', earnings_quality:'盈餘', sector_rotation:'產業'
+        };
+
+        let stratHtml = Object.entries(stratNames).map(([k, label]) => {
+            const v = strats[k];
+            if (v === null || v === undefined) return `<span class="badge bg-secondary me-1">${label}?</span>`;
+            return v ? `<span class="badge-pass me-1">${label} ✓</span>` : `<span class="badge-fail me-1">${label} ✗</span>`;
+        }).join('');
+
+        const ml_pct = d.ml && d.ml.confidence != null ? (d.ml.confidence * 100).toFixed(1) + '%' : '-';
+        const sigColor = d.signal === 'BUY' ? 'positive' : 'negative';
+
+        document.getElementById('stockModalBody').innerHTML = `
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <div>
+                    <span class="fs-4 fw-bold">${d.symbol}</span>
+                    <span class="badge ${d.signal === 'BUY' ? 'bg-success' : 'bg-danger'} ms-2">${d.signal || '-'}</span>
+                    <span class="text-muted ms-2">評分: <strong>${fmt(d.total_score)}</strong></span>
+                    <span class="text-muted ms-2">Regime: <strong>${d.macro_regime || '-'}</strong></span>
+                </div>
+                <div class="text-end text-muted small">${d.scan_date}</div>
+            </div>
+            <h6>📋 策略矩陣 (${d.total_strategies || '?'} 策略)</h6>
+            <div class="mb-3">${stratHtml}</div>
+            <div class="row">
+                <div class="col-md-6">
+                    <h6>💰 價格 & 支撐壓力</h6>
+                    <table class="table table-sm">
+                        <tr><th>現價</th><td>${dollar(price.current)}</td></tr>
+                        <tr><th>支撐 1</th><td>${dollar(price.support_1)}</td></tr>
+                        <tr><th>支撐 2</th><td>${dollar(price.support_2)}</td></tr>
+                        <tr><th>壓力 1</th><td>${dollar(price.resistance_1)}</td></tr>
+                        <tr><th>壓力 2</th><td>${dollar(price.resistance_2)}</td></tr>
+                    </table>
+                </div>
+                <div class="col-md-6">
+                    <h6>📈 基本面</h6>
+                    <table class="table table-sm">
+                        <tr><th>PE</th><td>${fmt(fund.pe_ratio)}</td><th>PEG</th><td>${fmt(fund.peg_ratio)}</td></tr>
+                        <tr><th>PB</th><td>${fmt(fund.pb_ratio)}</td><th>ROE</th><td>${pct(fund.roe)}</td></tr>
+                        <tr><th>毛利率</th><td>${pct(fund.gross_margin)}</td><th>淨利率</th><td>${pct(fund.profit_margin)}</td></tr>
+                        <tr><th>機構持股</th><td>${pct(fund.institutional_ownership)}</td><th>空頭比率</th><td>${fmt(fund.short_ratio,1)}</td></tr>
+                        <tr><th>營收成長</th><td>${pct(fund.revenue_growth)}</td><th>EPS成長</th><td>${pct(fund.earnings_growth)}</td></tr>
+                        <tr><th>產業</th><td colspan="3">${fund.sector || '-'}</td></tr>
+                    </table>
+                </div>
+            </div>
+            <div class="mt-2">
+                <h6>🤖 ML 信心度: <strong>${ml_pct}</strong></h6>
+            </div>
+        `;
+    } catch(e) {
+        document.getElementById('stockModalBody').innerHTML = `<p class="text-danger">載入失敗: ${e.message}</p>`;
+    }
+}
+
+// ============================================
+// Portfolio
+// ============================================
+async function loadPortfolio() {
+    try {
+        const resp = await fetch('/api/portfolio');
+        const data = await resp.json();
+        const holdings = data.holdings || [];
+        const tbody = document.getElementById('portfolioBody');
+
+        if (!holdings.length) {
+            tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-4">無持倉資料</td></tr>';
+            return;
         }
 
-        // 更新統計卡片
-        function updateStats(strategy) {
-            document.getElementById('strategyName').textContent = strategy.strategy_name;
-            
-            const totalReturn = strategy.total_return * 100;
-            const totalReturnEl = document.getElementById('totalReturn');
-            totalReturnEl.textContent = totalReturn.toFixed(2) + '%';
-            totalReturnEl.className = 'stat-value ' + (totalReturn >= 0 ? 'positive' : 'negative');
-            
-            document.getElementById('sharpeRatio').textContent = strategy.sharpe_ratio.toFixed(2);
-            
-            const maxDrawdown = strategy.max_drawdown * 100;
-            document.getElementById('maxDrawdown').textContent = maxDrawdown.toFixed(2) + '%';
+        tbody.innerHTML = holdings.map(h => {
+            const pnlClass = h.pnl != null ? (h.pnl >= 0 ? 'positive' : 'negative') : '';
+            return `<tr>
+                <td><strong>${h.symbol}</strong></td>
+                <td>${h.entry_date || '-'}</td>
+                <td>${dollar(h.entry_price)}</td>
+                <td>${h.exit_date || '<span class="text-success">持有中</span>'}</td>
+                <td>${h.exit_price ? dollar(h.exit_price) : '-'}</td>
+                <td class="${pnlClass}">${h.pnl != null ? '$'+Number(h.pnl).toFixed(2) : '-'}</td>
+                <td>${h.confidence != null ? pct(h.confidence, 0) : '-'}</td>
+            </tr>`;
+        }).join('');
+
+        // Sector Pie Chart
+        buildSectorPie(holdings);
+    } catch(e) {
+        console.error(e);
+    }
+}
+
+function buildSectorPie(holdings) {
+    // Determine sector from SECTOR_MAP clientside (simplified)
+    const sectorMap = {
+        AAPL:'Tech', MSFT:'Tech', NVDA:'Tech', AVGO:'Tech', AMD:'Tech', CRM:'Tech', ADBE:'Tech', INTC:'Tech',
+        GOOGL:'Comm', META:'Comm', NFLX:'Comm', DIS:'Comm',
+        AMZN:'Cons.D', TSLA:'Cons.D', HD:'Cons.D',
+        JPM:'Fin', V:'Fin', MA:'Fin', BAC:'Fin',
+        LLY:'Health', UNH:'Health', JNJ:'Health', MRK:'Health', ABBV:'Health',
+        XOM:'Energy', CVX:'Energy',
+        PG:'Staples', KO:'Staples', PEP:'Staples', WMT:'Staples',
+        SPY:'ETF', QQQ:'ETF', IWM:'ETF',
+    };
+    const counts = {};
+    holdings.forEach(h => {
+        const s = sectorMap[h.symbol] || 'Other';
+        counts[s] = (counts[s] || 0) + 1;
+    });
+
+    const labels = Object.keys(counts);
+    const values = Object.values(counts);
+    const colors = ['#667eea','#00c853','#f5576c','#ffd200','#4facfe','#764ba2','#ff9100','#11998e','#999'];
+
+    if (sectorPieChart) sectorPieChart.destroy();
+    const ctx = document.getElementById('sectorPieChart').getContext('2d');
+    sectorPieChart = new Chart(ctx, {
+        type: 'doughnut',
+        data: { labels, datasets: [{ data: values, backgroundColor: colors.slice(0, labels.length) }] },
+        options: { responsive: true, plugins: { legend: { position: 'bottom', labels: { font: { size: 11 } } } } }
+    });
+}
+
+// ============================================
+// Backtest
+// ============================================
+async function loadBacktestList() {
+    try {
+        const resp = await fetch('/api/strategies');
+        strategies = await resp.json();
+        const container = document.getElementById('backtestList');
+
+        if (!strategies.length) {
+            container.innerHTML = '<div class="p-3 text-center text-muted">尚無回測</div>';
+            return;
         }
 
-        // 載入權益曲線
-        async function loadEquityCurve(runId) {
-            try {
-                const response = await fetch(`/api/run/${runId}/equity`);
-                const data = await response.json();
-                
-                // 銷毀舊圖表
-                if (currentChart) {
-                    currentChart.destroy();
-                }
-                
-                // 創建新圖表
-                const ctx = document.getElementById('chartCanvas').getContext('2d');
-                currentChart = new Chart(ctx, {
-                    type: 'line',
-                    data: {
-                        labels: data.dates,
-                        datasets: [{
-                            label: '權益值',
-                            data: data.values,
-                            borderColor: '#667eea',
-                            backgroundColor: 'rgba(102, 126, 234, 0.1)',
-                            borderWidth: 2,
-                            fill: true,
-                            tension: 0.4
-                        }]
-                    },
-                    options: {
-                        responsive: true,
-                        maintainAspectRatio: true,
-                        plugins: {
-                            legend: {
-                                display: true,
-                                position: 'top'
-                            },
-                            tooltip: {
-                                mode: 'index',
-                                intersect: false
-                            }
-                        },
-                        scales: {
-                            x: {
-                                display: true,
-                                title: {
-                                    display: true,
-                                    text: '日期'
-                                },
-                                ticks: {
-                                    maxRotation: 45,
-                                    minRotation: 45
-                                }
-                            },
-                            y: {
-                                display: true,
-                                title: {
-                                    display: true,
-                                    text: '權益值 ($)'
-                                }
-                            }
-                        }
-                    }
-                });
-                
-            } catch (error) {
-                console.error('載入權益曲線失敗:', error);
-            }
+        container.innerHTML = strategies.map((s, i) => `
+            <div class="list-group-item strategy-item ${i===0?'active':''}" onclick="selectBacktest(${s.id}, this)">
+                <div class="d-flex justify-content-between">
+                    <small class="fw-bold">${s.strategy_name}</small>
+                    <small class="${s.total_return >= 0 ? 'positive' : 'negative'}">${(s.total_return*100).toFixed(1)}%</small>
+                </div>
+                <small class="text-muted">${s.start_date} ~ ${s.end_date}</small>
+            </div>
+        `).join('');
+
+        if (strategies.length > 0) selectBacktest(strategies[0].id, container.firstElementChild);
+    } catch(e) { console.error(e); }
+}
+
+async function selectBacktest(runId, el) {
+    document.querySelectorAll('#backtestList .strategy-item').forEach(i => i.classList.remove('active'));
+    if (el) el.classList.add('active');
+
+    const s = strategies.find(x => x.id === runId);
+    if (s) {
+        const ret = s.total_return * 100;
+        document.getElementById('btReturn').textContent = ret.toFixed(2) + '%';
+        document.getElementById('btReturn').className = 'stat-value ' + (ret >= 0 ? 'positive' : 'negative');
+        document.getElementById('btSharpe').textContent = s.sharpe_ratio.toFixed(2);
+        document.getElementById('btDrawdown').textContent = (s.max_drawdown * 100).toFixed(2) + '%';
+        document.getElementById('btName').textContent = s.strategy_name;
+    }
+
+    // Load equity
+    try {
+        const resp = await fetch(`/api/run/${runId}/equity`);
+        const data = await resp.json();
+        if (equityChart) equityChart.destroy();
+        const ctx = document.getElementById('equityChart').getContext('2d');
+        equityChart = new Chart(ctx, {
+            type: 'line',
+            data: { labels: data.dates, datasets: [{ label: '權益值', data: data.values, borderColor: '#4facfe', backgroundColor: 'rgba(79,172,254,0.1)', borderWidth: 2, fill: true, tension: 0.3 }] },
+            options: { responsive: true, plugins: { legend: { display: false } }, scales: { x: { ticks: { maxRotation: 45 } } } }
+        });
+    } catch(e) { console.error(e); }
+
+    // Load trades
+    try {
+        const resp = await fetch(`/api/run/${runId}/trades`);
+        const trades = await resp.json();
+        const tbody = document.getElementById('btTradesBody');
+        if (!trades.length) { tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted">無交易</td></tr>'; return; }
+        tbody.innerHTML = trades.map(t => {
+            const cls = t.pnl >= 0 ? 'positive' : 'negative';
+            return `<tr><td>${t.symbol||'-'}</td><td>${t.entry_date||'-'}</td><td>${t.exit_date||'-'}</td><td>${dollar(t.entry_price)}</td><td>${dollar(t.exit_price)}</td><td class="${cls}">${dollar(t.pnl)}</td></tr>`;
+        }).join('');
+    } catch(e) { console.error(e); }
+}
+
+// ============================================
+// Macro
+// ============================================
+async function loadMacro() {
+    try {
+        const resp = await fetch('/api/macro');
+        const data = await resp.json();
+
+        if (data.regime) {
+            const r = data.regime;
+            const dot = document.getElementById('regimeDot');
+            dot.className = 'regime-dot ' + ({RISK_ON:'regime-risk-on', NEUTRAL:'regime-neutral', RISK_OFF:'regime-risk-off'}[r.regime] || 'regime-neutral');
+            document.getElementById('regimeLabel').textContent = r.regime || 'UNKNOWN';
+            document.getElementById('regimeDesc').textContent = r.description || '';
+            document.getElementById('regimeDate').textContent = r.report_date || '';
         }
 
-        // 載入交易記錄
-        async function loadTrades(runId) {
-            try {
-                const response = await fetch(`/api/run/${runId}/trades`);
-                const trades = await response.json();
-                
-                const tbody = document.getElementById('tradesBody');
-                
-                if (trades.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted">無交易記錄</td></tr>';
-                    return;
-                }
-                
-                tbody.innerHTML = trades.map(trade => {
-                    const pnlClass = trade.pnl >= 0 ? 'positive' : 'negative';
-                    return `
-                        <tr>
-                            <td>${trade.symbol || 'N/A'}</td>
-                            <td>${trade.entry_date || '-'}</td>
-                            <td>${trade.exit_date || '-'}</td>
-                            <td>$${trade.entry_price.toFixed(2)}</td>
-                            <td>$${trade.exit_price.toFixed(2)}</td>
-                            <td class="${pnlClass}">$${trade.pnl.toFixed(2)}</td>
-                        </tr>
-                    `;
-                }).join('');
-                
-            } catch (error) {
-                console.error('載入交易記錄失敗:', error);
-            }
+        const ind = data.indicators || {};
+        document.getElementById('macroVix').textContent = ind.vix ? fmt(ind.vix.value, 1) : '-';
+        document.getElementById('macroYield').textContent = ind.yield_curve ? fmt(ind.yield_curve.value, 2) : '-';
+        document.getElementById('macroUnemploy').textContent = ind.unemployment_rate ? fmt(ind.unemployment_rate.value, 1) + '%' : '-';
+        document.getElementById('macroFed').textContent = ind.fed_rate ? fmt(ind.fed_rate.value, 2) + '%' : '-';
+
+        // Color VIX
+        if (ind.vix) {
+            const v = Number(ind.vix.value);
+            document.getElementById('macroVix').className = 'stat-value ' + (v > 30 ? 'negative' : v > 20 ? 'text-warn' : 'positive');
+        }
+    } catch(e) { console.error(e); }
+}
+
+async function loadSectors() {
+    try {
+        const resp = await fetch('/api/sectors');
+        const data = await resp.json();
+        const tbody = document.getElementById('sectorBody');
+        const sectors = data.sectors || [];
+
+        if (!sectors.length) {
+            tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-3">無產業數據</td></tr>';
+            return;
         }
 
-        // 每 30 秒自動重新載入數據
-        setInterval(loadStrategies, 30000);
-        setInterval(loadMLStatus, 30000);
-        setInterval(loadRecommendations, 60000);
+        tbody.innerHTML = sectors.map(s => `
+            <tr>
+                <td>${s.rank || '-'}</td>
+                <td><strong>${s.sector}</strong></td>
+                <td>${s.etf || '-'}</td>
+                <td style="${heatColor(s.return_20d)}">${pct(s.return_20d)}</td>
+                <td style="${heatColor(s.return_63d)}">${pct(s.return_63d)}</td>
+                <td style="${heatColor(s.return_252d)}">${pct(s.return_252d)}</td>
+            </tr>
+        `).join('');
+    } catch(e) { console.error(e); }
+}
 
-        // 載入每日推薦
-        async function loadRecommendations() {
-            try {
-                const dateVal = document.getElementById('recDate').value;
-                let url = '/api/recommendations?limit=10';
-                if (dateVal) url += '&date=' + dateVal;
+// ============================================
+// ML Status
+// ============================================
+async function loadMLStatus() {
+    try {
+        const resp = await fetch('/api/ml_status');
+        const data = await resp.json();
 
-                const response = await fetch(url);
-                const data = await response.json();
-                const tbody = document.getElementById('recBody');
-
-                if (!data.recommendations || data.recommendations.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="12" class="text-center text-muted">該日無推薦數據</td></tr>';
-                    return;
-                }
-
-                tbody.innerHTML = data.recommendations.map(r => {
-                    const pass = v => v ? '<span class="text-success">✓</span>' : '<span class="text-muted">✗</span>';
-                    const sigClass = r.signal_type === 'BUY' ? 'positive' : 'text-muted';
-                    const mlConf = r.ml_confidence != null ? (r.ml_confidence * 100).toFixed(0) + '%' : '-';
-                    return `<tr>
-                        <td><strong>${r.rank}</strong></td>
-                        <td><strong>${r.symbol}</strong></td>
-                        <td class="${sigClass}">${r.signal_type}</td>
-                        <td>${r.total_score.toFixed(2)}</td>
-                        <td>${pass(r.breakout_pass)}</td>
-                        <td>${pass(r.acceleration_pass)}</td>
-                        <td>${pass(r.peg_pass)}</td>
-                        <td>${pass(r.dupont_pass)}</td>
-                        <td>${mlConf}</td>
-                        <td>$${r.current_price.toFixed(2)}</td>
-                        <td>$${r.support_1 ? r.support_1.toFixed(2) : '-'}</td>
-                        <td>$${r.resistance_1 ? r.resistance_1.toFixed(2) : '-'}</td>
-                    </tr>`;
-                }).join('');
-            } catch (error) {
-                console.error('載入推薦數據失敗:', error);
-                document.getElementById('recBody').innerHTML =
-                    '<tr><td colspan="12" class="text-center text-danger">載入失敗</td></tr>';
-            }
+        const fiList = document.getElementById('featureList');
+        if (data.feature_importance && data.feature_importance.length) {
+            fiList.innerHTML = data.feature_importance.map(f =>
+                `<li class="list-group-item d-flex justify-content-between py-1"><span>${f.feature}</span><span class="badge bg-primary">${f.importance.toFixed(4)}</span></li>`
+            ).join('');
+        } else {
+            fiList.innerHTML = '<li class="list-group-item text-muted">模型尚未載入</li>';
         }
 
-        // 載入 ML 模型狀態
-        async function loadMLStatus() {
-            try {
-                const response = await fetch('/api/ml_status');
-                const data = await response.json();
-
-                // Feature Importance
-                const fiList = document.getElementById('featureImportanceList');
-                if (data.feature_importance && data.feature_importance.length > 0) {
-                    fiList.innerHTML = data.feature_importance.map(f =>
-                        `<li class="list-group-item d-flex justify-content-between py-1">
-                            <span>${f.feature}</span>
-                            <span class="badge bg-primary">${f.importance.toFixed(4)}</span>
-                        </li>`
-                    ).join('');
-                } else {
-                    fiList.innerHTML = '<li class="list-group-item text-muted">模型尚未載入</li>';
-                }
-
-                // Recent Signals
-                const tbody = document.getElementById('mlSignalsBody');
-                if (data.recent_signals && data.recent_signals.length > 0) {
-                    tbody.innerHTML = data.recent_signals.map(s => {
-                        const conf = s.confidence != null ? (s.confidence * 100).toFixed(1) + '%' : '-';
-                        const confClass = s.confidence >= 0.7 ? 'positive' : (s.confidence <= 0.3 ? 'negative' : '');
-                        return `<tr>
-                            <td>${s.symbol}</td>
-                            <td>${s.entry_date || '-'}</td>
-                            <td class="${confClass}">${conf}</td>
-                        </tr>`;
-                    }).join('');
-                } else {
-                    tbody.innerHTML = '<tr><td colspan="3" class="text-muted">無 ML 信號</td></tr>';
-                }
-            } catch (error) {
-                console.error('載入 ML 狀態失敗:', error);
-            }
+        const tbody = document.getElementById('mlBody');
+        if (data.recent_signals && data.recent_signals.length) {
+            tbody.innerHTML = data.recent_signals.map(s => {
+                const conf = s.confidence != null ? pct(s.confidence, 1) : '-';
+                const cls = s.confidence >= 0.7 ? 'positive' : s.confidence <= 0.3 ? 'negative' : '';
+                return `<tr><td>${s.symbol}</td><td>${s.entry_date||'-'}</td><td>${dollar(s.entry_price)}</td><td class="${cls}">${conf}</td></tr>`;
+            }).join('');
+        } else {
+            tbody.innerHTML = '<tr><td colspan="4" class="text-muted">無 ML 信號</td></tr>';
         }
-    </script>
+
+        // Update settings tab
+        document.getElementById('sysMl').textContent = data.model_loaded ? '已載入' : '未載入';
+        document.getElementById('sysMl').className = data.model_loaded ? 'positive' : 'text-muted';
+    } catch(e) { console.error(e); }
+}
+
+// ============================================
+// System Info
+// ============================================
+async function loadSystemInfo() {
+    try {
+        const resp = await fetch('/health');
+        const data = await resp.json();
+        document.getElementById('sysHealth').textContent = data.status === 'healthy' ? '🟢 正常運行' : '🔴 異常';
+        document.getElementById('sysHealth').className = data.status === 'healthy' ? 'positive' : 'negative';
+        document.getElementById('sysDb').textContent = data.database === 'connected' ? '🟢 已連接' : '🔴 斷線';
+        document.getElementById('sysLine').textContent = data.line_bot === 'enabled' ? '🟢 啟用' : '⚪ 未啟用';
+    } catch(e) {
+        document.getElementById('sysHealth').textContent = '🔴 無法連線';
+        document.getElementById('sysHealth').className = 'negative';
+    }
+
+    // Latest rec date
+    try {
+        const resp = await fetch('/api/recommendations/dates');
+        const data = await resp.json();
+        document.getElementById('sysLatestRec').textContent = (data.dates && data.dates[0]) || '無';
+    } catch(e) {}
+}
+</script>
 </body>
 </html>

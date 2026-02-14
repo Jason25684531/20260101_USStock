@@ -8,10 +8,10 @@
 """
 import pandas as pd
 import numpy as np
-import vectorbt as vbt
 from typing import Dict
 
 from config import calc_rsi
+from strategies.registry import BaseScreenStrategy
 
 
 # ============================================================
@@ -68,6 +68,16 @@ def screen_breakout(df: pd.DataFrame) -> Dict:
     return {"pass": passed, "score": round(score, 2), "details": " | ".join(parts)}
 
 
+class BreakoutStrategy(BaseScreenStrategy):
+    """Registry 版: 創新高延續動能策略"""
+    name = "breakout"
+    description = "200日突破 + RSI強勢 + 多頭排列"
+    category = "momentum"
+
+    def screen(self, df: pd.DataFrame, info: dict) -> Dict:
+        return screen_breakout(df)
+
+
 def screen_acceleration(df: pd.DataFrame, n: int = 20) -> Dict:
     """
     加速度指標策略篩選
@@ -115,6 +125,16 @@ def screen_acceleration(df: pd.DataFrame, n: int = 20) -> Dict:
     return {"pass": passed, "score": round(score, 2), "details": details}
 
 
+class AccelerationStrategy(BaseScreenStrategy):
+    """Registry 版: 加速度指標策略"""
+    name = "acceleration"
+    description = "均線曲率向上 = 越漲越快"
+    category = "momentum"
+
+    def screen(self, df: pd.DataFrame, info: dict) -> Dict:
+        return screen_acceleration(df, n=20)
+
+
 # ============================================================
 # VectorBT 回測函式 — 向後相容
 # ============================================================
@@ -123,7 +143,7 @@ def run_momentum_strategy(
     data: pd.DataFrame,
     lookback_period: int = 200,
     initial_cash: float = 10000.0
-) -> vbt.Portfolio:
+):
     """
     執行動量策略回測
 
@@ -151,6 +171,8 @@ def run_momentum_strategy(
         raise ValueError("數據必須包含 'Close' 列")
 
     close = data['Close']
+
+    import vectorbt as vbt  # lazy import — 僅回測時需要
 
     rolling_high = close.rolling(window=lookback_period, min_periods=lookback_period).max()
     entries = close > rolling_high.shift(1)

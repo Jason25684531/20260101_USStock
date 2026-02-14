@@ -9,11 +9,20 @@ Author: Quant System
 Created: 2025-12-31
 Updated: 2026-01-31 - Added ATR trailing stop functionality
 """
+from __future__ import annotations
 
 from typing import Tuple, Optional
 import pandas as pd
 import numpy as np
-import vectorbt as vbt
+
+from config import calc_atr
+
+try:
+    import vectorbt as vbt
+    _HAS_VBT = True
+except ImportError:
+    vbt = None  # type: ignore
+    _HAS_VBT = False
 
 
 def run_sma_strategy(
@@ -149,19 +158,7 @@ def calculate_atr(
     data: pd.DataFrame,
     period: int = 14
 ) -> pd.Series:
-    """
-    計算 Average True Range (ATR)
-
-    委派至 config.calc_atr 統一實作。
-
-    Args:
-        data: 包含 High, Low, Close 的 DataFrame
-        period: ATR 計算週期（默認14天）
-
-    Returns:
-        ATR 值的 Series
-    """
-    from config import calc_atr
+    """計算 ATR — 委派至 config.calc_atr（保留向後兼容介面）。"""
     return calc_atr(data, period)
 
 

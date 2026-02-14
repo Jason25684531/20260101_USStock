@@ -427,26 +427,37 @@ class MockBroker:
         except Exception as e:
             print(f"⚠️  無法保存狀態檔案: {e}")
     
-    def get_account(self) -> Dict[str, float]:
+    def get_account(self, prices: Optional[Dict[str, float]] = None) -> Dict[str, float]:
         """
         Get current account information.
+        
+        Args:
+            prices: {symbol: current_price} 用於計算持倉市值（可選）
+                    若不提供，equity = cash（向後相容）
         
         Returns:
             Dict with keys:
                 - cash: Available cash balance
                 - buying_power: Total buying power (same as cash for mock)
-                - equity: Total account equity
-                - portfolio_value: Current portfolio value
+                - equity: Total account equity (cash + positions)
+                - portfolio_value: Current portfolio value (positions only)
         """
-        # Calculate portfolio value (would need current prices in real impl)
-        # For now, just return cash
         cash = self.state['cash']
+        
+        # 計算持倉市值
+        position_value = 0.0
+        if prices:
+            for sym, qty in self.state['positions'].items():
+                if sym in prices and prices[sym] > 0:
+                    position_value += qty * prices[sym]
+        
+        equity = cash + position_value
         
         return {
             'cash': cash,
             'buying_power': cash,
-            'equity': cash,  # Simplified: cash + position values
-            'portfolio_value': cash
+            'equity': equity,
+            'portfolio_value': position_value,
         }
     
     def get_positions(self) -> Dict[str, int]:
