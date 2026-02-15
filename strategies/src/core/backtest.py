@@ -154,14 +154,6 @@ def calculate_metrics(portfolio: vbt.Portfolio) -> dict:
     }
 
 
-def calculate_atr(
-    data: pd.DataFrame,
-    period: int = 14
-) -> pd.Series:
-    """計算 ATR — 委派至 config.calc_atr（保留向後兼容介面）。"""
-    return calc_atr(data, period)
-
-
 def apply_atr_stop(
     entry_price: float,
     current_price: float,
@@ -210,7 +202,7 @@ def calculate_atr_stop_levels(
         (止損價格 Series, ATR 值 Series)
     """
     # 計算 ATR
-    atr = calculate_atr(data, period=atr_period)
+    atr = calc_atr(data, period=atr_period)
     
     # 獲取入場價格
     entry_prices = data['Close'].where(entries).ffill()

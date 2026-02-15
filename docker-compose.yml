@@ -72,9 +72,9 @@ services:
     volumes:
       - ./web:/app
     ports:
-      - "6688:6688"
+      - "6688:5000"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:6688/health"]
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:5000/health')\""]
       interval: 30s
       timeout: 10s
       retries: 3

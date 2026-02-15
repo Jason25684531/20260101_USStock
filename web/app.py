@@ -46,11 +46,15 @@ _column_exists = column_exists
 # ============================================
 WEB_PASSWORD = get_secret('web_password', default='admin123')
 WEB_PASSWORD_HASH = generate_password_hash(WEB_PASSWORD)
+WEB_DISABLE_AUTH = os.getenv('WEB_DISABLE_AUTH', 'false').lower() in ('1', 'true', 'yes', 'on')
 
 
 @auth.verify_password
 def verify_password(username, password):
     """驗證用戶名和密碼"""
+    if WEB_DISABLE_AUTH:
+        return username or 'anonymous'
+
     if username == 'admin' and check_password_hash(WEB_PASSWORD_HASH, password):
         return username
     return None
@@ -796,14 +800,8 @@ def get_sectors():
                     FROM daily_recommendations
                     WHERE scan_date = :d
                 """), {'d': str(latest_scan)})
-                sector_map = {
-                    'AAPL': 'Technology', 'MSFT': 'Technology', 'NVDA': 'Technology', 'AMD': 'Technology',
-                    'GOOGL': 'Communication', 'META': 'Communication', 'NFLX': 'Communication',
-                    'AMZN': 'Consumer Discretionary', 'TSLA': 'Consumer Discretionary',
-                    'JPM': 'Financials', 'BAC': 'Financials', 'V': 'Financials', 'MA': 'Financials',
-                    'LLY': 'Healthcare', 'UNH': 'Healthcare', 'JNJ': 'Healthcare',
-                    'XOM': 'Energy', 'CVX': 'Energy',
-                }
+                from constants import SECTOR_MAP_FALLBACK
+                sector_map = SECTOR_MAP_FALLBACK
                 agg = {}
                 for row in rows:
                     sym = row[0]
@@ -861,5 +859,8 @@ if __name__ == '__main__':
     print(f"   DB: {DB_CONFIG['host']}:{DB_CONFIG['port']}:{DB_CONFIG['name']}")
     print(f"   訪問地址: http://0.0.0.0:{port}")
     print("   Line Bot Webhook: /callback")
-    print("   認證: 用戶名='admin'")
+    if WEB_DISABLE_AUTH:
+        print("   認證: 已停用 (WEB_DISABLE_AUTH=true)")
+    else:
+        print("   認證: 用戶名='admin'")
     app.run(host='0.0.0.0', port=port, debug=True)

@@ -51,25 +51,35 @@ def verify_signature(func):
     @wraps(func)
     def wrapper(*args, **kwargs):
         signature = request.headers.get('X-Line-Signature', '')
+        
+        # 如果未配置 Channel Secret，允許請求通過（僅供開發環境）
+        if not CHANNEL_SECRET:
+            print("⚠️  Channel Secret 未配置，跳過簽名驗證（僅限開發環境）")
+            return func(*args, **kwargs)
+        
         if not signature:
             print("❌ 缺少 X-Line-Signature 標頭")
             abort(400, description="Missing X-Line-Signature header")
 
-        if not CHANNEL_SECRET:
-            print("⚠️  Channel Secret 未配置，跳過簽名驗證（僅限開發環境）")
-            return func(*args, **kwargs)
+        try:
+            body = request.get_data(as_text=True)
+            hash_value = hmac.new(
+                CHANNEL_SECRET.encode('utf-8'),
+                body.encode('utf-8'),
+                hashlib.sha256,
+            ).digest()
+            expected = base64.b64encode(hash_value).decode('utf-8')
 
-        body = request.get_data(as_text=True)
-        hash_value = hmac.new(
-            CHANNEL_SECRET.encode('utf-8'),
-            body.encode('utf-8'),
-            hashlib.sha256,
-        ).digest()
-        expected = base64.b64encode(hash_value).decode('utf-8')
-
-        if not hmac.compare_digest(signature, expected):
-            print("❌ 簽名驗證失敗")
-            abort(403, description="Invalid signature")
+            if not hmac.compare_digest(signature, expected):
+                print("❌ 簽名驗證失敗")
+                print(f"   收到: {signature[:20]}...")
+                print(f"   預期: {expected[:20]}...")
+                abort(403, description="Invalid signature")
+            
+            print("✅ 簽名驗證成功")
+        except Exception as e:
+            print(f"❌ 簽名驗證異常: {e}")
+            abort(403, description=f"Signature verification error: {str(e)}")
 
         return func(*args, **kwargs)
     return wrapper
@@ -78,16 +88,34 @@ def verify_signature(func):
 # ============================================
 # Webhook 路由
 # ============================================
+@line_bot_bp.route('/callback', methods=['GET'])
+def callback_health():
+    """LINE Webhook 健康檢查端點（GET 請求）"""
+    return jsonify({
+        'status': 'ok',
+        'message': 'LINE Bot Webhook is running',
+        'endpoint': '/callback',
+        'methods': ['GET', 'POST']
+    }), 200
+
+
 @line_bot_bp.route('/callback', methods=['POST'])
+@verify_signature
 def callback():
-    """LINE Webhook 回調端點 - 簽名驗證已禁用（開發模式）"""
+    """LINE Webhook 回調端點（POST 請求）- 已啟用簽名驗證"""
     try:
         body = request.get_json()
         if not body:
+            print("⚠️  收到空的請求 body")
             return jsonify({'status': 'error', 'message': 'Empty body'}), 400
 
-        for event in body.get('events', []):
+        events = body.get('events', [])
+        print(f"📨 收到 {len(events)} 個事件")
+
+        for event in events:
             event_type = event.get('type')
+            print(f"🔔 處理事件類型: {event_type}")
+            
             if event_type == 'message':
                 handle_message_event(event)
             elif event_type == 'follow':
@@ -101,7 +129,9 @@ def callback():
         return jsonify({'status': 'ok'}), 200
 
     except Exception as e:
-        print(f"❌ Webhook 處理錯誤: {e}")
+        print(f"❌ Webhook 處理錯誤: {type(e).__name__}: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
@@ -537,14 +567,8 @@ def _cmd_sector() -> List[dict]:
                         FROM daily_recommendations
                         WHERE scan_date = (SELECT MAX(scan_date) FROM daily_recommendations)
                     """))
-                    sector_map = {
-                        'AAPL': 'Technology', 'MSFT': 'Technology', 'NVDA': 'Technology', 'AMD': 'Technology',
-                        'GOOGL': 'Communication', 'META': 'Communication', 'NFLX': 'Communication',
-                        'AMZN': 'Consumer Discretionary', 'TSLA': 'Consumer Discretionary',
-                        'JPM': 'Financials', 'BAC': 'Financials', 'V': 'Financials', 'MA': 'Financials',
-                        'LLY': 'Healthcare', 'UNH': 'Healthcare', 'JNJ': 'Healthcare',
-                        'XOM': 'Energy', 'CVX': 'Energy',
-                    }
+                    from constants import SECTOR_MAP_FALLBACK
+                    sector_map = SECTOR_MAP_FALLBACK
                     agg = {}
                     for row in rows:
                         sector_name = sector_map.get(row[0], 'Other')

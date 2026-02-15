@@ -1,5 +1,181 @@
 # 更新日志
 
+
+
+## 2026-02-15 (????????)
+
+### ??
+- `docker-compose.yml`??? web_dashboard ??????????????????????
+- `verify_all.ps1`???? ASCII ??????????? API ???
+- `doc/WORKSPACE_SCAN_REPORT.md`??? manual_checks ????
+
+### ??
+- `python -m pytest strategies/tests`
+- `powershell -ExecutionPolicy Bypass -File .\verify_all.ps1`
+- `powershell -ExecutionPolicy Bypass -File .\test_linebot.ps1`
+
+### ???
+- ????????????????? API/?????
+- ?? Web ??????????????????
+
+
+## 2026-02-15 (???????)
+
+### ??
+- `strategies/tests` ????????? `strategies/scripts/manual_checks/`??? pytest ?????????
+- ?? `test_macro_and_sector.py`?`test_position_and_risk.py` ?????????? `conftest.py` ???????
+- ???????`ml/features.py` ???? `config.calc_rsi`?`core/backtest.py` ???? `config.calc_atr`?
+- README ??????????/???????????????
+
+### ??
+- `python -m pytest strategies/tests`
+
+### ???
+- ??????????/?????? sector map????? Docker ??????????
+- ?? Web/LineBot ????????????????????
+## 2026-02-15 (Regression & LINE 驗收) - 一鍵回歸 + 指令抽測
+
+### ✅ 一鍵回歸腳本新增
+- 新增 `scripts/run_oneclick_regression.ps1`
+  - 覆蓋項目：`/health`、`/api/recommendations`、`/api/macro`、`/api/sectors`
+  - 覆蓋簽名 Webhook 指令：`/help`、`Top5`、`/market`、`/sector`、`/status`
+  - 自動輸出 JSON 報告到 `data/reports/`
+
+### 📈 回歸執行結果（可追溯）
+- 報告文件：`data/reports/regression_20260215_233900.json`
+- 總測試：9
+- 通過：9
+- 失敗：0
+- 通過率：100%
+
+### 📱 LINE 指令抽測（簽名 Webhook，實機服務）
+- 抽測文件：`data/reports/line_sampling_20260215_233939.json`
+- 抽測命令與結果：
+  - `/help` → `ok`
+  - `Top5` → `ok`
+  - `/market` → `ok`
+  - `/sector` → `ok`
+  - `/status` → `ok`
+  - `/strategies` → `ok`
+
+### 🧪 驗收結論
+- 全流程回歸檢查通過（健康檢查 + 主要 API + 簽名 webhook）
+- LINE 指令抽測全部成功
+- 本次驗證已形成落地報告與更新日誌紀錄，可回溯
+
+---
+
+## 2026-02-15 (Phase 2) - 文檔層級優化與指令分層
+
+### 📚 README 核心整合
+- **增強** README 從 203 行 → ~400 行（重點整合而非膨脹）
+  - 新增「立即啟動 (3 步，10 分鐘)」詳細步驟
+    - Step 1: 準備 Secrets (複製模板、填入密鑰)
+    - Step 2: 啟動服務 (docker-compose up -d)
+    - Step 3: 驗證並訪問 (檢查 health + Web Dashboard)
+  - 新增「LineBot 核心配置 (5 分鐘)」梗概
+    - 4 步快速配置（Line Developers → Token → User ID → Webhook）
+    - 支援的命令表（Top5、ML、/status 等）
+  - 新增「前端使用入門」段落
+    - Web Dashboard 功能說明
+    - API 基本概念 & 認證
+    - 主要端點速查表
+
+### 📄 文檔分層完成
+- **精簡** QUICK_START.md（5 步 → 詳細配置 + 8 個常見 Q&A）
+  - 移除重複的啟動步驟內容
+  - 強化「Secrets 文件詳細說明」（含驗證方法）
+  - 強化「故障排除」章節（8 個完整案例）
+  - 保留進階檢查 & 性能優化建議
+
+- **精簡** COMMANDS_REFERENCE.md（480 → 200 行）
+  - 保留最常用 5 個指令 (status, screener, test, logs, restart)
+  - 核心環境變數只列 5 個（TRADING_MODE, STRATEGY_TYPE, USE_ML, WEB_PORT, USE_SCHEDULER）
+  - 新增「深度操作」導航表（指向 ADVANCED_REFERENCE.md）
+  - 刪除重複的配置說明和冗長示例
+
+### 📖 新增 ADVANCED_REFERENCE.md（~450 行）
+- 完整的深度操作指南，包含：
+  - **ML 訓練與評估**（train_local_model.py, train_model.py, 特徵重要性）
+  - **Walk-Forward 回測**（選股回測、ML 回測、指標解讀）
+  - **API 端點詳解**（/api/recommendations, /api/ml_status, /api/macro, /api/sectors）
+  - **測試與驗證**（編譯檢查、單元測試、端到端測試）
+  - **數據庫管理**（MySQL 連接、備份、Schema 修改）
+  - **環境變數完整參考**（15 個核心 + 進階變數）
+
+### 🎯 文檔導航樹
+
+```
+README.md (400 行)
+├─ 新手 → 立即啟動 3 步 + LineBot 梗概 + 前端使用
+├─ 詳細配置 → QUICK_START.md (8 個 Q&A)
+├─ 常用指令 → COMMANDS_REFERENCE.md (速查表)
+├─ 深度操作 → ADVANCED_REFERENCE.md (450 行)
+└─ LineBot 設置 → LINEBOT_SETUP.md (完整指南)
+```
+
+### ✅ 驗證完成
+- ✅ 文檔間交叉引用全部有效（相對路徑）
+- ✅ 無內容重複或遺漏（所有舊內容妥善轉移）
+- ✅ 新手啟動路徑標準化：README → Docker up → Web 訪問 ≤ 10 分鐘
+- ✅ OpenSpec tasks.md 已全部標記為完成 [x]
+
+### 📊 文檔規模統計
+
+| 文檔 | 字數/行數 | 說明 |
+|------|---------|------|
+| README.md | ~400 行 | 首頁概述 + 核心操作 |
+| QUICK_START.md | ~300 行 | 詳細配置 + Q&A |
+| COMMANDS_REFERENCE.md | ~200 行 | 速查表 |
+| ADVANCED_REFERENCE.md | ~450 行 | 深度指令 |
+| LINEBOT_SETUP.md | ~350 行 | LineBot 完整 |
+| **總計** | **~1700 行** | **精簡 60% (vs 3000+ 原始)** |
+
+---
+
+## 2026-02-15 (Phase 1) - 文檔簡化與指令統一
+
+### 📚 文檔結構重組
+- **新增** [QUICK_START.md](../QUICK_START.md) — 5 步快速啟動指南 (~150 行)
+  - 環境準備、Secrets 配置、服務啟動、驗證、常見問題排查
+  
+- **新增** [COMMANDS_REFERENCE.md](../COMMANDS_REFERENCE.md) — 指令速查表 (~480 行)
+  - 服務管理 (docker-compose)
+  - 日常操作 (選股、回測、訓練)
+  - 測試驗證 (API、函式、端到端)
+  - 環境變數快速參考
+  - 數據庫操作 (連接、備份、檢查)
+
+- **新增** [LINEBOT_SETUP.md](../LINEBOT_SETUP.md) — LineBot 完整設置指南 (~350 行)
+  - Line Developers 應用程式註冊步驟
+  - Channel 認證取得
+  - Webhook URL 配置 (開發 + 生產)
+  - 命令清單與測試
+  - 故障排除與進階設置
+
+### 📄 README.md 精簡
+- **精簡** README.md 從 658 行 → 203 行 (減 69%)
+  - 保留：概述、架構圖、組件、系統模式、快速開啟、服務管理、文件結構
+  - 移除：詳細配置步驟、冗長測試指令、複雜評分機制說明
+  - 添加：清晰的導航鏈接指向 QUICK_START、LINEBOT_SETUP、COMMANDS_REFERENCE
+
+### 🎯 導引改進
+- README 顶部新增快速導航：
+  ```markdown
+  新使用者 → QUICK_START.md (5 分鐘終底)
+  指令查詢 → COMMANDS_REFERENCE.md
+  LineBot 設定 → LINEBOT_SETUP.md
+  詳細文檔 → README.md 核心內容
+  ```
+
+### ✅ 驗證完成
+- ✅ 所有鏈接有效 (相對路徑)
+- ✅ 文檔無信息遺漏 (所有舊內容已妥善重組)
+- ✅ 新文檔可獨立使用
+- ✅ OpenSpec 提案已完成 `openspec/changes/260215_simplify-docs-and-commands/`
+
+---
+
 ## 2026-02-14 - 程式碼清洗與架構整合（Phase 2 深度清理）
 
 ### 🧹 重複函式整合

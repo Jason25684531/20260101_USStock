@@ -9,11 +9,6 @@ from typing import Optional
 from config import calc_rsi
 
 
-def calculate_rsi(prices: pd.Series, period: int = 14) -> pd.Series:
-    """計算 RSI — 委派至 config.calc_rsi（保留向後兼容介面）。"""
-    return calc_rsi(prices, period)
-
-
 def calculate_macd(
     prices: pd.Series, 
     fast_period: int = 12,
@@ -269,7 +264,7 @@ def make_features(
     # ===== 1. 核心技術指標特徵（必備） =====
     
     # RSI
-    df['RSI_14'] = calculate_rsi(df['Close'], period=14)
+    df['RSI_14'] = calc_rsi(df['Close'], period=14)
     
     # MACD
     macd_df = calculate_macd(df['Close'])
