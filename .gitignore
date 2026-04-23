@@ -6,6 +6,8 @@
 *.key
 openspec/
 doc/
+.github/
+.claude/
 
 # Python
 venv/

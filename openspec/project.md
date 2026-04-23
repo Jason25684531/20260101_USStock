@@ -1,41 +1,37 @@
-# Quant System Project Context
+# USStock 量化交易系統開發計畫 (v1.1)
 
-## 1. System Philosophy
-- **Objective**: Institution-grade US Stock Quantitative Trading System (High Alpha, Low Risk).
-- **Core Principles**:
-  - **Data Persistence**: All backtest results (equity curves, trade logs) MUST be saved to MySQL. No "fire and forget".
-  - **Vectorization**: Use `vectorbt` for all strategy calculations. No `for` loops for signal generation.
-  - **Zero Trust Security**: API Keys (Alpaca/LineBot) must use Docker Secrets (`/run/secrets/`).
+## 1. 系統哲學
+- **目標**：機構級美股量化交易系統，結合機器學習（量化）與多智能體辯論（質化）。
+- **核心原則**：
+  - **數據持久化**：所有回測與 AI 辯論日誌必須存入 MySQL，拒絕「即發即棄」。
+  - **雙模組決策**：混合規則過濾、XGBoost 排序與 TradingAgents (MAS) 最終審核。
+  - **Open Data Platform**：使用 OpenBB 作為統一數據入口，解決 API 碎片化與數據破洞。
 
-## 2. Technology Stack
-- **Infrastructure**: Docker Compose (Microservices), MySQL 8.0.
-- **Language**: Python 3.10+ (Type Hints required).
-- **Data Source**: 
-  - `yfinance`: For historical data (OHLCV) and fundamental data (PE, PB ratios).
-- **Backtesting**: `vectorbt` (Vectorized Backtesting).
-- **Web**: Flask (API) + Vanilla JS/Chart.js (Dashboard).
+## 2. 技術棧 (Technology Stack)
+- **基礎設施**：Docker Compose (微服務化), MySQL 8.0.
+- **數據源**：
+  - **OpenBB SDK**：整合 Alpaca, FMP, YFinance, FRED 等數據提供商。
+- **策略與模型**：
+  - **機器學習**：XGBoost (分類預測)。
+  - **AI 代理**：LangGraph (TradingAgents 框架)，實作多智能體辯論。
+- **交易執行**：Alpaca API (Paper Trading)。
+- **通知**：LINE Messaging API (Flex Message 報告)。
 
-## 3. Core Strategies (Logic Definitions)
-Based on "FinLab" and "Mr. Market" literature:
+## 3. 核心模組架構 (Phase 2)
+### A. 數據中心 (Data Hub)
+- **OpenBB Feeder**：統一抓取量價、深度財報與新聞消息面。
+- **News Cache**：MySQL `news_cache` 表格，存儲歷史新聞供 Agent 回測使用。
 
-### Strategy A: Momentum 200 (動能策略)
-- **Concept**: Trend Following / VCP.
-- **Signal**:
-  - **Entry**: Close price > Highest High of past 200 days.
-  - **Exit**: Close price < 20-day Moving Average (Trailing Stop).
-- **Universe**: S&P 500 constituents (approximated by top 500 US stocks by volume).
+### B. 策略引擎 (Strategy Engine)
+- **篩選器**：V30-V35 規則 + XGBoost 信心加權。
+- **AI Oracle**：呼叫 TradingAgents 進行「質化 Alpha」提取與風險辯論。
 
-### Strategy B: Value Investing (價值策略)
-- **Concept**: Undervalued High-Quality Stocks.
-- **Signal**:
-  - **Filter 1**: P/E Ratio (本益比) < 15.
-  - **Filter 2**: P/B Ratio (股價淨值比) < 1.5.
-  - **Filter 3**: Price > SMA(60) (Trend Filter).
-- **Rebalance**: Quarterly.
+### C. 風控與執行 (Risk & Execution)
+- **ATR Position Sizing**：基於平均真實波幅動態計算股數。
+- **Market Regime Filter**：偵測 SPY 200MA 與宏觀經濟指標。
+- **Intraday Monitor**：盤中即時監控支撐位與情緒崩跌。
 
-## 4. Architecture & Data Flow
-1.  **Ingest**: `MarketDataAdapter` fetches data from `yfinance`.
-2.  **Store**: Raw market data saved to MySQL `market_data` table.
-3.  **Compute**: `StrategyEngine` (VectorBT) queries MySQL -> runs logic -> generates signals.
-4.  **Persist**: `DatabaseAdapter` saves `Portfolio` stats (Sharpe, Returns) and `Equity Curve` to MySQL.
-5.  **Visualize**: Web Dashboard queries MySQL -> draws charts.
+## 4. 開發里程碑
+- [x] Phase 1: 選股大腦穩定化 (V30-V35 + XGBoost)。
+- [ ] Phase 2: 風控強化與 AI 決策整合 (OpenBB + TradingAgents)。
+- [ ] Phase 3: 自動化執行與全自動回測管線。
