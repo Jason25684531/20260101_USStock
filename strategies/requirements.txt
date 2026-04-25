@@ -27,6 +27,7 @@ pytz==2023.3
 
 # Notifications
 requests>=2.31.0
+google-genai>=1.0.0
 
 # Utilities
 python-dotenv==1.0.0

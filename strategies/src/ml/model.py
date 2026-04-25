@@ -24,7 +24,7 @@ try:
     XGBOOST_AVAILABLE = True
 except ImportError:
     XGBOOST_AVAILABLE = False
-    print("⚠️  XGBoost 未安裝，將使用 RandomForest")
+    print("[WARN] XGBoost 未安裝，將使用 RandomForest")
 
 # 嘗試導入 matplotlib
 try:
@@ -34,7 +34,7 @@ try:
     MATPLOTLIB_AVAILABLE = True
 except ImportError:
     MATPLOTLIB_AVAILABLE = False
-    print("⚠️  matplotlib 未安裝，將無法生成圖表")
+    print("[WARN] matplotlib 未安裝，將無法生成圖表")
 
 
 class StrategyModel:
@@ -75,7 +75,7 @@ class StrategyModel:
         
         # 如果選擇 XGBoost 但未安裝，自動回退到 RandomForest
         if model_type == 'xgboost' and not XGBOOST_AVAILABLE:
-            print("⚠️  XGBoost 不可用，回退到 RandomForest")
+            print("[WARN] XGBoost 不可用，回退到 RandomForest")
             model_type = 'randomforest'
             self.model_type = 'randomforest'
         
@@ -94,7 +94,7 @@ class StrategyModel:
                 use_label_encoder=False,
                 **kwargs
             )
-            print(f"✅ 使用 XGBoost 模型 (n_estimators={n_estimators}, max_depth={max_depth}, "
+            print(f"[OK] 使用 XGBoost 模型 (n_estimators={n_estimators}, max_depth={max_depth}, "
                   f"lr={learning_rate}, lambda={reg_lambda}, gamma={gamma})")
         else:
             # 使用 RandomForest
@@ -108,7 +108,7 @@ class StrategyModel:
                 class_weight='balanced',
                 **kwargs
             )
-            print(f"✅ 使用 RandomForest 模型 (n_estimators={n_estimators}, max_depth={max_depth})")
+            print(f"[OK] 使用 RandomForest 模型 (n_estimators={n_estimators}, max_depth={max_depth})")
         
         self.feature_names = None
         self.feature_importance = None
@@ -170,13 +170,13 @@ class StrategyModel:
             )
             # 記錄實際使用的迭代次數
             best_iteration = getattr(self.model, 'best_iteration', self.model.n_estimators)
-            print(f"   ✅ 最佳迭代次數: {best_iteration}")
+            print(f"   [OK] 最佳迭代次數: {best_iteration}")
         else:
             self.model.fit(X_train, y_train)
         
         training_time = (datetime.now() - start_time).total_seconds()
         
-        print(f"   ✅ 訓練完成 (耗時: {training_time:.2f}秒)")
+        print(f"   [OK] 訓練完成 (耗時: {training_time:.2f}秒)")
         
         # 獲取特徵重要性
         self.feature_importance = pd.DataFrame({
@@ -327,7 +327,7 @@ class StrategyModel:
         with open(filepath, 'wb') as f:
             pickle.dump(model_data, f)
         
-        print(f"\n✅ 模型已保存到: {filepath}")
+        print(f"\n[OK] 模型已保存到: {filepath}")
     
     @classmethod
     def load(cls, filepath: str = None) -> 'StrategyModel':
@@ -365,7 +365,7 @@ class StrategyModel:
         instance.is_trained = True
         
         trained_at = model_data.get('trained_at', 'unknown')
-        print(f"✅ 模型已加載: {filepath}")
+        print(f"[OK] 模型已加載: {filepath}")
         print(f"   訓練時間: {trained_at}")
         print(f"   特徵數量: {len(instance.feature_names)}")
         
@@ -398,7 +398,7 @@ class StrategyModel:
             保存的文件路徑
         """
         if not MATPLOTLIB_AVAILABLE:
-            print("⚠️  matplotlib 未安裝，無法生成特徵重要性圖表")
+            print("[WARN] matplotlib 未安裝，無法生成特徵重要性圖表")
             return ""
         
         if self.feature_importance is None:
@@ -465,7 +465,7 @@ class StrategyModel:
             保存的文件路徑（空字串如果 matplotlib 不可用）
         """
         if not MATPLOTLIB_AVAILABLE:
-            print("⚠️  matplotlib 未安裝，無法生成預測準確度圖表")
+            print("[WARN] matplotlib 未安裝，無法生成預測準確度圖表")
             return ""
         
         if not self.is_trained:
