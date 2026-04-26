@@ -23,6 +23,31 @@ class MacroRegime(IntEnum):
     RISK_OFF = 2
 
 
+BULL_MARKET = "BULL_MARKET"
+BEAR_MARKET = "BEAR_MARKET"
+
+
+def get_market_regime(spy_df: pd.DataFrame) -> str:
+    """以 SPY 收盤價相對 200 日均線判斷多空 regime。"""
+    if spy_df is None or spy_df.empty:
+        return BULL_MARKET
+
+    close_column = "close" if "close" in spy_df.columns else "Close" if "Close" in spy_df.columns else None
+    if close_column is None:
+        raise KeyError("spy_df 必須包含 close 或 Close 欄位")
+
+    close = pd.to_numeric(spy_df[close_column], errors="coerce").dropna()
+    if close.empty:
+        return BULL_MARKET
+
+    sma_200 = close.rolling(window=200, min_periods=1).mean()
+    latest_close = float(close.iloc[-1])
+    latest_sma_200 = float(sma_200.iloc[-1])
+    if latest_close < latest_sma_200:
+        return BEAR_MARKET
+    return BULL_MARKET
+
+
 def classify_macro_regime(
     vix: Optional[float] = None,
     yield_curve: Optional[float] = None,  # T10Y2Y

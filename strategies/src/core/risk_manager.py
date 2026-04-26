@@ -12,6 +12,30 @@ from typing import Dict, Optional, Tuple
 from dataclasses import dataclass, field
 from datetime import date
 
+SELL = "SELL"
+HOLD = "HOLD"
+
+
+def check_stop_loss_and_take_profit(
+    entry_price: float,
+    current_price: float,
+    highest_price: float,
+) -> str:
+    """以固定 8% 硬停損與條件式移動停利判斷是否賣出。"""
+    if min(entry_price, current_price, highest_price) <= 0:
+        return HOLD
+
+    hard_stop_price = entry_price * 0.92
+    if current_price <= hard_stop_price:
+        return SELL
+
+    trailing_activation_price = entry_price * 1.15
+    trailing_stop_price = highest_price * 0.95
+    if highest_price >= trailing_activation_price and current_price <= trailing_stop_price:
+        return SELL
+
+    return HOLD
+
 
 @dataclass
 class PositionRisk:
@@ -40,6 +64,16 @@ class PositionRisk:
         Returns:
             (should_exit, reason)
         """
+        stop_action = check_stop_loss_and_take_profit(
+            entry_price=self.entry_price,
+            current_price=current_price,
+            highest_price=self.highest_since_entry,
+        )
+        if stop_action == SELL:
+            if current_price <= self.entry_price * 0.92:
+                return True, "Hard Stop (-8.0%)"
+            return True, f"Trailing Take Profit ({self.highest_since_entry:.2f})"
+
         # Trailing Stop
         if current_price <= self.trailing_stop:
             return True, f"Trailing Stop ({self.trailing_stop:.2f})"

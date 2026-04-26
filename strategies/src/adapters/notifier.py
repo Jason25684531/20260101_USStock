@@ -15,7 +15,12 @@ import requests
 from datetime import datetime, date
 from typing import Optional, Dict, List
 
-from utils.security import get_secret
+import pandas as pd
+
+try:
+    from utils.security import get_secret
+except ImportError:
+    from strategies.src.utils.security import get_secret
 
 
 class LineNotifier:
@@ -23,7 +28,7 @@ class LineNotifier:
     
     def __init__(self):
         """初始化 Line Bot 通知器"""
-        self.channel_token = get_secret('line_channel_token')
+        self.channel_token = get_secret('line_channel_access_token', default=get_secret('line_channel_token'))
         self.user_id = get_secret('line_user_id')  # 接收通知的用戶 ID
         self.api_url = "https://api.line.me/v2/bot/message/push"
         
@@ -237,6 +242,95 @@ class LineNotifier:
         }
 
         return self._send_message([flex_message])
+
+    def build_daily_screener_flex(self, top_n_df: pd.DataFrame) -> Dict:
+        """將 ml_strategy 的 Top N DataFrame 轉為每日情報 Flex Carousel。"""
+        if top_n_df is None or top_n_df.empty:
+            return {
+                "type": "flex",
+                "altText": "📊 今日無推薦標的",
+                "contents": {
+                    "type": "bubble",
+                    "body": {
+                        "type": "box",
+                        "layout": "vertical",
+                        "contents": [{"type": "text", "text": "今日無推薦標的", "weight": "bold"}],
+                    },
+                },
+            }
+
+        bubbles = [self._build_daily_screener_bubble(record) for record in top_n_df.to_dict(orient="records")[:5]]
+        latest_date = str(top_n_df["latest_date"].iloc[0]) if "latest_date" in top_n_df.columns else date.today().isoformat()
+        return {
+            "type": "flex",
+            "altText": f"📊 每日情報 Top {len(bubbles)} — {latest_date}",
+            "contents": {
+                "type": "carousel",
+                "contents": bubbles,
+            },
+        }
+
+    def send_daily_screener_flex(self, top_n_df: pd.DataFrame) -> bool:
+        """推送每日量化 screener 結果；未配置 token 時以 dry-run 成功結束。"""
+        flex_message = self.build_daily_screener_flex(top_n_df)
+        if not self.is_enabled:
+            preview = json.dumps(flex_message["contents"], ensure_ascii=False)[:400]
+            print("⚠️  Line Token/User ID 未配置，Dry-run 成功，Flex payload 預覽如下:")
+            print(preview)
+            return True
+
+        return self._send_message([flex_message])
+
+    def _build_daily_screener_bubble(self, rec: Dict) -> Dict:
+        valuation_status = str(rec.get("valuation_status") or "FAIR").upper()
+        status_label_map = {
+            "UNDERVALUED": ("🟢 便宜 / UNDERVALUED", "#0B6E4F"),
+            "FAIR": ("🟡 合理 / FAIR", "#A16207"),
+            "OVERVALUED": ("🔴 偏貴 / OVERVALUED", "#B42318"),
+        }
+        status_text, header_color = status_label_map.get(valuation_status, status_label_map["FAIR"])
+
+        xgboost_score = rec.get("xgboost_score")
+        buy_price = rec.get("buy_price")
+        suggested_allocation_pct = rec.get("suggested_allocation_pct")
+        ai_reason = str(rec.get("ai_reason") or "未提供 AI 摘要")[:60]
+
+        body_rows = [
+            self._flex_kv("AI 勝率", f"{float(xgboost_score):.2f}" if xgboost_score is not None else "N/A"),
+            self._flex_kv("建議買入價", f"< ${float(buy_price):.2f}" if buy_price is not None else "N/A"),
+            self._flex_kv("建議資金佔比", f"{float(suggested_allocation_pct):.1f}%" if suggested_allocation_pct is not None else "N/A"),
+        ]
+
+        return {
+            "type": "bubble",
+            "size": "mega",
+            "header": {
+                "type": "box",
+                "layout": "vertical",
+                "backgroundColor": header_color,
+                "paddingAll": "14px",
+                "contents": [
+                    {"type": "text", "text": str(rec.get("symbol", "N/A")), "weight": "bold", "size": "xl", "color": "#FFFFFF"},
+                    {"type": "text", "text": status_text, "size": "sm", "color": "#F9FAFB", "wrap": True, "margin": "sm"},
+                ],
+            },
+            "body": {
+                "type": "box",
+                "layout": "vertical",
+                "spacing": "md",
+                "contents": body_rows,
+                "paddingAll": "14px",
+            },
+            "footer": {
+                "type": "box",
+                "layout": "vertical",
+                "contents": [
+                    {"type": "text", "text": "AI 理由", "size": "xs", "color": "#667085", "weight": "bold"},
+                    {"type": "text", "text": ai_reason, "size": "sm", "wrap": True, "color": "#111827", "margin": "sm"},
+                ],
+                "paddingAll": "14px",
+            },
+        }
 
     def _build_stock_bubble(self, rec: Dict) -> Dict:
         """

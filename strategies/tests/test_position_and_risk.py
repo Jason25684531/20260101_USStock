@@ -4,8 +4,8 @@ Tests for position sizing and risk management utilities.
 
 from datetime import date, timedelta
 
-from core.position_sizing import calc_atr_position_size, calc_equal_risk_weights
-from core.risk_manager import RiskManager
+from core.position_sizing import calc_atr_position_size, calc_equal_risk_weights, calculate_position_size
+from core.risk_manager import HOLD, SELL, RiskManager, check_stop_loss_and_take_profit
 
 
 def test_calc_atr_position_size_guardrails():
@@ -35,6 +35,19 @@ def test_calc_equal_risk_weights_caps_max_weight():
     )
     assert weights["AAPL"] == 200
     assert weights["MSFT"] == 100
+
+
+def test_calculate_position_size_caps_and_halves_in_bear_market():
+    result = calculate_position_size(total_equity=100_000, is_bear_market=True)
+    assert result["max_position_value"] == 12_500.0
+    assert result["allocation_pct"] == 0.125
+    assert result["capped_by_max_weight"] is False
+
+
+def test_check_stop_loss_and_take_profit_returns_sell():
+    assert check_stop_loss_and_take_profit(100.0, 92.0, 100.0) == SELL
+    assert check_stop_loss_and_take_profit(100.0, 109.25, 115.0) == SELL
+    assert check_stop_loss_and_take_profit(100.0, 103.0, 110.0) == HOLD
 
 
 def test_risk_manager_trailing_stop():

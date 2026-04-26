@@ -7,7 +7,10 @@ import pandas as pd
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
-from utils.db import get_db_config, get_engine
+try:
+    from utils.db import get_db_config, get_engine
+except ImportError:
+    from strategies.src.utils.db import get_db_config, get_engine
 
 
 class DatabaseAdapter:

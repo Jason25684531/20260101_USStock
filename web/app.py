@@ -10,11 +10,14 @@ Updated: 2026-01-31 - 添加 Line Bot 整合
 """
 import os
 import json
+from dotenv import load_dotenv
 from flask import Flask, render_template, jsonify
 from flask_httpauth import HTTPBasicAuth
 from werkzeug.security import check_password_hash, generate_password_hash
 from sqlalchemy import text
 from datetime import datetime
+
+load_dotenv()
 
 # 導入安全工具和 Line Bot Blueprint
 from security import get_secret
@@ -854,10 +857,11 @@ def get_recommendation_dates():
 
 
 if __name__ == '__main__':
-    port = int(os.getenv('WEB_PORT', '6688'))
+    port = int(os.getenv('WEB_PORT', '5000'))
     print("🚀 啟動 Flask 儀表板...")
     print(f"   DB: {DB_CONFIG['host']}:{DB_CONFIG['port']}:{DB_CONFIG['name']}")
-    print(f"   訪問地址: http://0.0.0.0:{port}")
+    print(f"   訪問地址: http://127.0.0.1:{port}")
+    print(f"   對外監聽: http://0.0.0.0:{port}")
     print("   Line Bot Webhook: /callback")
     if WEB_DISABLE_AUTH:
         print("   認證: 已停用 (WEB_DISABLE_AUTH=true)")

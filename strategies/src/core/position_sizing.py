@@ -14,6 +14,40 @@ import pandas as pd
 from typing import Dict, Optional, Tuple
 
 
+def calculate_position_size(
+    total_equity: float,
+    risk_per_trade: float = 0.02,
+    stop_loss_pct: float = 0.08,
+    max_allocation_pct: float = 0.25,
+    is_bear_market: bool = False,
+) -> Dict[str, float | bool]:
+    """依固定風險模型回傳建議部位價值與資金占比。"""
+    if total_equity <= 0 or risk_per_trade <= 0 or stop_loss_pct <= 0 or max_allocation_pct <= 0:
+        return {
+            "max_position_value": 0.0,
+            "allocation_pct": 0.0,
+            "risk_budget": 0.0,
+            "capped_by_max_weight": False,
+            "regime_adjustment": 0.5 if is_bear_market else 1.0,
+        }
+
+    risk_budget = float(total_equity) * float(risk_per_trade)
+    raw_position_value = risk_budget / float(stop_loss_pct)
+    max_capital_limit = float(total_equity) * float(max_allocation_pct)
+    base_position_value = min(raw_position_value, max_capital_limit)
+    regime_adjustment = 0.5 if is_bear_market else 1.0
+    final_position_value = base_position_value * regime_adjustment
+    allocation_pct = final_position_value / float(total_equity)
+
+    return {
+        "max_position_value": round(final_position_value, 4),
+        "allocation_pct": round(allocation_pct, 6),
+        "risk_budget": round(risk_budget, 4),
+        "capped_by_max_weight": raw_position_value > max_capital_limit,
+        "regime_adjustment": regime_adjustment,
+    }
+
+
 def calc_atr_position_size(
     atr: float,
     current_price: float,
@@ -94,7 +128,11 @@ def calc_equal_risk_weights(
 
 def calc_atr_from_df(df: pd.DataFrame, period: int = 14) -> float:
     """從 OHLCV DataFrame 計算 ATR 最新值"""
-    from config import calc_atr
+    try:
+        from strategies.src.config import calc_atr
+    except ImportError:
+        from config import calc_atr
+
     atr_series = calc_atr(df, period)
     if atr_series is not None and not atr_series.empty:
         val = atr_series.iloc[-1]

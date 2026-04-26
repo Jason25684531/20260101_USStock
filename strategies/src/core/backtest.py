@@ -15,7 +15,11 @@ from typing import Tuple, Optional
 import pandas as pd
 import numpy as np
 
-from config import calc_atr
+try:
+    from strategies.src.config import calc_atr
+except ImportError:
+    from config import calc_atr
+from .trading_costs import FRICTION_COST
 
 try:
     import vectorbt as vbt
@@ -30,7 +34,7 @@ def run_sma_strategy(
     fast_window: int = 20,
     slow_window: int = 50,
     initial_cash: float = 10000.0,
-    fees: float = 0.001
+    fees: float = FRICTION_COST
 ) -> Tuple[vbt.Portfolio, pd.DataFrame]:
     """
     Run a Simple Moving Average (SMA) crossover strategy using VectorBT.
@@ -44,7 +48,7 @@ def run_sma_strategy(
         fast_window: Window size for fast SMA (default: 20).
         slow_window: Window size for slow SMA (default: 50).
         initial_cash: Starting capital (default: 10000).
-        fees: Trading fees as a fraction (default: 0.001 = 0.1%).
+        fees: Trading fees as a fraction (default: 0.0023 = 0.23%).
         
     Returns:
         Tuple of (Portfolio object, signals DataFrame).
@@ -218,7 +222,7 @@ def run_strategy_with_atr_stop(
     entries: pd.Series,
     exits: pd.Series,
     initial_cash: float = 10000.0,
-    fees: float = 0.001,
+    fees: float = FRICTION_COST,
     atr_period: int = 14,
     atr_multiplier: float = 2.0
 ) -> Tuple[vbt.Portfolio, pd.DataFrame]:

@@ -2,14 +2,80 @@
 基本面策略 (Fundamental Strategy)
 
 包含兩個篩選函式（用於每日選股）:
-  1. screen_peg    — 本益成長比選股（0 < PEG < 1.5 + ROE > 10% + OCF > 0）
-  2. screen_dupont — 杜邦分析優質股（ROE > 5% + 資產周轉率 > 0.3 + PB < 8）
+    1. screen_peg    — 本益成長比選股（0 < PEG < 1.5 + ROE > 10% + OCF > 0）
+    2. screen_dupont — 杜邦分析優質股（ROE > 5% + 資產周轉率 > 0.3 + PB < 8）
 
 取代原 growth_peg.py 和 chips_momentum.py 中的篩選邏輯。
 """
 from typing import Dict
 
-from strategies.registry import BaseScreenStrategy
+import pandas as pd
+
+try:
+    from strategies.registry import BaseScreenStrategy
+except ImportError:
+    class BaseScreenStrategy:  # type: ignore[override]
+        name = "base"
+        description = "base"
+        category = "base"
+
+        def screen(self, df, info: dict) -> Dict:
+            raise NotImplementedError
+
+
+def calculate_valuation_targets(
+    current_price: float,
+    eps_ttm: float | None,
+    fair_pe: float = 15,
+    safety_margin: float = 0.2,
+    premium: float = 0.2,
+) -> Dict:
+    """根據 P/E 估值回傳合理價與買賣帶。"""
+    safe_result = {
+        "current_pe": None,
+        "fair_price": None,
+        "buy_price": None,
+        "sell_price": None,
+        "valuation_status": "FAIR",
+        "valuation_supported": False,
+        "eps_ttm": float(eps_ttm) if eps_ttm is not None and pd.notna(eps_ttm) else None,
+        "fair_pe": float(fair_pe),
+        "safety_margin": float(safety_margin),
+        "premium": float(premium),
+    }
+
+    if current_price is None or pd.isna(current_price) or float(current_price) <= 0:
+        return safe_result
+
+    if eps_ttm is None or pd.isna(eps_ttm) or float(eps_ttm) <= 0:
+        return safe_result
+
+    current_price = float(current_price)
+    eps_ttm = float(eps_ttm)
+    current_pe = current_price / eps_ttm
+    fair_price = eps_ttm * float(fair_pe)
+    buy_price = fair_price * (1 - float(safety_margin))
+    sell_price = fair_price * (1 + float(premium))
+
+    if current_price < buy_price:
+        valuation_status = "UNDERVALUED"
+    elif current_price > sell_price:
+        valuation_status = "OVERVALUED"
+    else:
+        valuation_status = "FAIR"
+
+    return {
+        "current_pe": round(current_pe, 4),
+        "fair_price": round(fair_price, 4),
+        "buy_price": round(buy_price, 4),
+        "sell_price": round(sell_price, 4),
+        "valuation_status": valuation_status,
+        "valuation_supported": True,
+        "eps_ttm": round(eps_ttm, 4),
+        "fair_pe": float(fair_pe),
+        "safety_margin": float(safety_margin),
+        "premium": float(premium),
+    }
 
 
 def screen_peg(info: dict) -> Dict:

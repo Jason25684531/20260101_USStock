@@ -101,8 +101,8 @@ def run_walk_forward(
     symbol: str,
     start_date: str = "2024-01-01",
     end_date: str = None,
-    buy_threshold: float = 0.7,
-    sell_threshold: float = 0.3,
+    buy_threshold: float = 0.65,
+    sell_threshold: float = 0.40,
     commission_rate: float = 0.001,
 ) -> pd.DataFrame:
     """
@@ -165,10 +165,17 @@ def run_walk_forward(
 
     # ===== 策略報酬（Long-Only Cash Management） =====
     df_bt["daily_return"] = df_bt["Close"].pct_change()
-    # Long-Only 策略：BUY = 做多 (1)，HOLD/SELL = 現金 (0)，不做空
-    df_bt["position"] = 0
-    df_bt.loc[df_bt["signal"] == "BUY", "position"] = 1
-    # SELL 和 HOLD 都持現金 (position=0)，日報酬為 0%
+    # Long-Only hysteresis：BUY 進場、SELL 出場、HOLD 沿用前一日狀態。
+    current_position = 0
+    position_states = []
+    for signal in df_bt["signal"]:
+        if signal == "BUY":
+            current_position = 1
+        elif signal == "SELL":
+            current_position = 0
+        position_states.append(current_position)
+
+    df_bt["position"] = pd.Series(position_states, index=df_bt.index)
     # 隔日才能反映信號（信號在收盤生成，隔日開盤執行）
     df_bt["position"] = df_bt["position"].shift(1).fillna(0)
     df_bt["strategy_daily"] = df_bt["position"] * df_bt["daily_return"]
@@ -196,6 +203,7 @@ def run_walk_forward(
     print(f" 📊 Walk-Forward 回測結果 — {symbol}")
     print(f"{'='*60}")
     print(f"   回測期間: {start_date} → {end_date}")
+    print(f"   閾值設定: BUY >= {buy_threshold:.2f} | SELL <= {sell_threshold:.2f}")
     print(f"   交易日數: {total_days}")
     print(f"   BUY 天數: {buy_days}   SELL 天數: {sell_days}   HOLD 天數: {total_days - buy_days - sell_days}")
     print(f"   策略累計報酬 (Gross): {strategy_return:+.2%}")
@@ -222,7 +230,14 @@ def fetch_spy_benchmark(start_date: str, end_date: str) -> pd.Series:
 # =============================================
 # 繪圖
 # =============================================
-def plot_equity(df_bt: pd.DataFrame, symbol: str, spy_cum: pd.Series, save_path: str):
+def plot_equity(
+    df_bt: pd.DataFrame,
+    symbol: str,
+    spy_cum: pd.Series,
+    save_path: str,
+    buy_threshold: float,
+    sell_threshold: float,
+):
     """繪製 Equity Curve 對比圖"""
     if not MATPLOTLIB_AVAILABLE:
         print("⚠️  matplotlib 未安裝，跳過繪圖")
@@ -247,10 +262,30 @@ def plot_equity(df_bt: pd.DataFrame, symbol: str, spy_cum: pd.Series, save_path:
 
     # --- 下圖: 每日預測概率 ---
     ax2 = axes[1]
-    ax2.fill_between(df_bt.index, df_bt["up_prob"] * 100, 50, where=df_bt["up_prob"] >= 0.5, alpha=0.4, color="#4CAF50", label="Bullish")
-    ax2.fill_between(df_bt.index, df_bt["up_prob"] * 100, 50, where=df_bt["up_prob"] < 0.5, alpha=0.4, color="#F44336", label="Bearish")
-    ax2.axhline(55, color="green", linestyle="--", linewidth=0.8, label="Buy Threshold (55%)")
-    ax2.axhline(30, color="red", linestyle="--", linewidth=0.8, label="Sell Threshold (30%)")
+    up_prob_pct = df_bt["up_prob"] * 100
+    buy_threshold_pct = buy_threshold * 100
+    sell_threshold_pct = sell_threshold * 100
+    ax2.plot(df_bt.index, up_prob_pct, color="#263238", linewidth=1.2, label="Up Probability")
+    ax2.fill_between(
+        df_bt.index,
+        up_prob_pct,
+        buy_threshold_pct,
+        where=df_bt["up_prob"] >= buy_threshold,
+        alpha=0.35,
+        color="#4CAF50",
+        label="Buy Zone",
+    )
+    ax2.fill_between(
+        df_bt.index,
+        up_prob_pct,
+        sell_threshold_pct,
+        where=df_bt["up_prob"] <= sell_threshold,
+        alpha=0.35,
+        color="#F44336",
+        label="Sell Zone",
+    )
+    ax2.axhline(buy_threshold_pct, color="green", linestyle="--", linewidth=0.8, label=f"Buy Threshold ({buy_threshold_pct:.0f}%)")
+    ax2.axhline(sell_threshold_pct, color="red", linestyle="--", linewidth=0.8, label=f"Sell Threshold ({sell_threshold_pct:.0f}%)")
     ax2.set_ylabel("Up Probability (%)")
     ax2.set_xlabel("Date")
     ax2.legend(loc="upper right", fontsize=8)
@@ -272,8 +307,8 @@ def main():
     parser.add_argument("--start", default="2024-01-01", help="回測起始日 (default: 2024-01-01)")
     parser.add_argument("--end", default=None, help="回測結束日 (default: 今天)")
     parser.add_argument("--model", default=None, help="模型路徑 (default: data/model.pkl)")
-    parser.add_argument("--buy-threshold", type=float, default=0.55)
-    parser.add_argument("--sell-threshold", type=float, default=0.3)
+    parser.add_argument("--buy-threshold", type=float, default=0.65)
+    parser.add_argument("--sell-threshold", type=float, default=0.40)
     args = parser.parse_args()
 
     print("=" * 60)
@@ -308,7 +343,14 @@ def main():
     # 繪圖
     report_dir = PROJECT_ROOT / "data" / "reports"
     plot_path = str(report_dir / "ml_performance_2024.png")
-    plot_equity(df_bt, args.symbol, spy_cum, plot_path)
+    plot_equity(
+        df_bt,
+        args.symbol,
+        spy_cum,
+        plot_path,
+        buy_threshold=args.buy_threshold,
+        sell_threshold=args.sell_threshold,
+    )
 
     # 保存 CSV
     csv_path = str(report_dir / "ml_backtest_2024.csv")

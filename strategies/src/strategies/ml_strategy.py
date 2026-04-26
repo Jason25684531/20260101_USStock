@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
+import time
 import warnings
 from functools import lru_cache
 from pathlib import Path
@@ -18,6 +20,7 @@ if __package__ in (None, ""):
 
 from strategies.src.config import DB_URI, UNIVERSE_TICKERS, calc_rsi
 from strategies.src.agents import SentimentAgent
+from strategies.src.core.position_sizing import calculate_position_size
 
 MODEL_MODULE_PATH = Path(__file__).resolve().parents[1] / "ml" / "model.py"
 MODEL_SPEC = importlib.util.spec_from_file_location("usstock_strategy_model", MODEL_MODULE_PATH)
@@ -27,6 +30,25 @@ if MODEL_SPEC is None or MODEL_SPEC.loader is None:
 MODEL_MODULE = importlib.util.module_from_spec(MODEL_SPEC)
 MODEL_SPEC.loader.exec_module(MODEL_MODULE)
 StrategyModel = MODEL_MODULE.StrategyModel
+
+FUNDAMENTAL_MODULE_PATH = Path(__file__).resolve().parent / "fundamental.py"
+FUNDAMENTAL_SPEC = importlib.util.spec_from_file_location("usstock_strategy_fundamental", FUNDAMENTAL_MODULE_PATH)
+if FUNDAMENTAL_SPEC is None or FUNDAMENTAL_SPEC.loader is None:
+    raise ImportError(f"無法載入基本面模組: {FUNDAMENTAL_MODULE_PATH}")
+
+FUNDAMENTAL_MODULE = importlib.util.module_from_spec(FUNDAMENTAL_SPEC)
+FUNDAMENTAL_SPEC.loader.exec_module(FUNDAMENTAL_MODULE)
+calculate_valuation_targets = FUNDAMENTAL_MODULE.calculate_valuation_targets
+
+MACRO_FILTER_MODULE_PATH = Path(__file__).resolve().parent / "macro_filter.py"
+MACRO_FILTER_SPEC = importlib.util.spec_from_file_location("usstock_strategy_macro_filter", MACRO_FILTER_MODULE_PATH)
+if MACRO_FILTER_SPEC is None or MACRO_FILTER_SPEC.loader is None:
+    raise ImportError(f"無法載入宏觀濾網模組: {MACRO_FILTER_MODULE_PATH}")
+
+MACRO_FILTER_MODULE = importlib.util.module_from_spec(MACRO_FILTER_SPEC)
+MACRO_FILTER_SPEC.loader.exec_module(MACRO_FILTER_MODULE)
+BEAR_MARKET = MACRO_FILTER_MODULE.BEAR_MARKET
+get_market_regime = MACRO_FILTER_MODULE.get_market_regime
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
@@ -42,6 +64,19 @@ CRITICAL_FEATURES = [
     "Volatility_20",
     "Momentum_10",
 ]
+SCREENING_EQUITY_BASE = 100_000.0
+
+
+def _format_price(value: float | None) -> str:
+    if value is None or pd.isna(value):
+        return "N/A"
+    return f"{float(value):.2f}"
+
+
+def _format_percent(value: float | None) -> str:
+    if value is None or pd.isna(value):
+        return "N/A"
+    return f"{float(value):.1f}%"
 
 
 def calculate_macd(
@@ -242,6 +277,205 @@ def _get_spy_close(index: pd.DatetimeIndex) -> pd.Series | None:
     return aligned.reindex(clean_index.normalize(), method="ffill")
 
 
+def _load_latest_fundamentals(symbols: list[str]) -> dict[str, dict]:
+    if not symbols:
+        return {}
+
+    symbol_list = [symbol.upper() for symbol in symbols]
+    placeholders = ", ".join(f":s{i}" for i in range(len(symbol_list)))
+    params = {f"s{i}": symbol for i, symbol in enumerate(symbol_list)}
+
+    query = text(
+        f"""
+        SELECT sf.symbol, sf.data_date, sf.pe_ratio, sf.forward_pe, sf.peg_ratio, sf.pb_ratio,
+               sf.market_cap, sf.revenue_growth_yoy, sf.earnings_growth_yoy
+        FROM stock_fundamentals sf
+        INNER JOIN (
+            SELECT symbol, MAX(data_date) AS max_data_date
+            FROM stock_fundamentals
+            WHERE symbol IN ({placeholders})
+            GROUP BY symbol
+        ) latest
+            ON sf.symbol = latest.symbol
+           AND sf.data_date = latest.max_data_date
+        WHERE sf.symbol IN ({placeholders})
+        ORDER BY sf.symbol ASC
+        """
+    )
+
+    try:
+        fundamentals_df = pd.read_sql(query, con=ENGINE, params=params)
+    except Exception as error:
+        print(f"[WARN] [基本面] 讀取 stock_fundamentals 失敗: {error}")
+        return {}
+
+    if fundamentals_df.empty:
+        return {}
+
+    records: dict[str, dict] = {}
+    for row in fundamentals_df.to_dict(orient="records"):
+        symbol = str(row.pop("symbol", "")).upper()
+        if symbol:
+            records[symbol] = row
+    return records
+
+
+def _derive_eps_ttm(current_price: float, fundamentals: dict | None) -> float | None:
+    if not fundamentals or current_price <= 0:
+        return None
+
+    direct_eps = fundamentals.get("eps_ttm")
+    if direct_eps is not None and pd.notna(direct_eps) and float(direct_eps) > 0:
+        return float(direct_eps)
+
+    for pe_key in ("pe_ratio", "forward_pe"):
+        pe_value = fundamentals.get(pe_key)
+        if pe_value is not None and pd.notna(pe_value) and float(pe_value) > 0:
+            return float(current_price) / float(pe_value)
+
+    return None
+
+
+def _build_display_frame(results_df: pd.DataFrame, include_ai: bool) -> pd.DataFrame:
+    display_df = results_df.copy()
+    display_df["target_buy_price"] = display_df["buy_price"].apply(_format_price)
+    display_df["target_sell_price"] = display_df["sell_price"].apply(_format_price)
+    display_df["suggested_allocation"] = display_df["suggested_allocation_pct"].apply(_format_percent)
+
+    columns = [
+        "symbol",
+        "latest_date",
+        "latest_close",
+        "xgboost_score",
+        "valuation_status",
+        "target_buy_price",
+        "target_sell_price",
+        "suggested_allocation",
+    ]
+    if include_ai:
+        columns.extend(["ai_score", "ai_reason"])
+    return display_df[columns]
+
+
+def _to_sql_nullable(value):
+    if value is None or pd.isna(value):
+        return None
+    return value
+
+
+def save_daily_screener_results(results_df: pd.DataFrame, top_n: int = 5) -> int:
+    if results_df is None or results_df.empty:
+        return 0
+
+    top_df = results_df.head(top_n).copy()
+    scan_date = pd.to_datetime(top_df["latest_date"].iloc[0]).date()
+
+    create_table_sql = text(
+        """
+        CREATE TABLE IF NOT EXISTS daily_recommendations (
+            id BIGINT AUTO_INCREMENT PRIMARY KEY,
+            scan_date DATE NOT NULL,
+            symbol VARCHAR(10) NOT NULL,
+            rank_position INT NOT NULL,
+            signal_type VARCHAR(4) NOT NULL DEFAULT 'BUY',
+            total_score DECIMAL(4,2) NOT NULL,
+            breakout_pass TINYINT(1) DEFAULT 0,
+            acceleration_pass TINYINT(1) DEFAULT 0,
+            peg_pass TINYINT(1) DEFAULT 0,
+            dupont_pass TINYINT(1) DEFAULT 0,
+            ml_confidence DECIMAL(4,3) DEFAULT NULL,
+            current_price DECIMAL(12,4) NOT NULL,
+            support_1 DECIMAL(12,4),
+            support_2 DECIMAL(12,4),
+            resistance_1 DECIMAL(12,4),
+            resistance_2 DECIMAL(12,4),
+            pe_ratio DECIMAL(10,2),
+            peg_ratio DECIMAL(10,4),
+            pb_ratio DECIMAL(10,2),
+            roe DECIMAL(10,4),
+            strategy_details JSON,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE KEY uk_date_symbol (scan_date, symbol),
+            INDEX idx_scan_date (scan_date)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """
+    )
+
+    insert_sql = text(
+        """
+        INSERT INTO daily_recommendations (
+            scan_date, symbol, rank_position, signal_type, total_score,
+            breakout_pass, acceleration_pass, peg_pass, dupont_pass,
+            ml_confidence, current_price,
+            support_1, support_2, resistance_1, resistance_2,
+            pe_ratio, peg_ratio, pb_ratio, roe, strategy_details
+        ) VALUES (
+            :scan_date, :symbol, :rank_position, :signal_type, :total_score,
+            :breakout_pass, :acceleration_pass, :peg_pass, :dupont_pass,
+            :ml_confidence, :current_price,
+            :support_1, :support_2, :resistance_1, :resistance_2,
+            :pe_ratio, :peg_ratio, :pb_ratio, :roe, :strategy_details
+        )
+        ON DUPLICATE KEY UPDATE
+            rank_position = VALUES(rank_position),
+            signal_type = VALUES(signal_type),
+            total_score = VALUES(total_score),
+            breakout_pass = VALUES(breakout_pass),
+            acceleration_pass = VALUES(acceleration_pass),
+            peg_pass = VALUES(peg_pass),
+            dupont_pass = VALUES(dupont_pass),
+            ml_confidence = VALUES(ml_confidence),
+            current_price = VALUES(current_price),
+            pe_ratio = VALUES(pe_ratio),
+            peg_ratio = VALUES(peg_ratio),
+            strategy_details = VALUES(strategy_details)
+        """
+    )
+
+    with ENGINE.begin() as conn:
+        conn.execute(create_table_sql)
+        for rank, (_, row) in enumerate(top_df.iterrows(), start=1):
+            strategy_details = {
+                "engine": "ml_strategy",
+                "xgboost_score": _to_sql_nullable(row["xgboost_score"]),
+                "ai_score": _to_sql_nullable(row.get("ai_score")),
+                "ai_reason": _to_sql_nullable(row.get("ai_reason")),
+                "valuation_status": _to_sql_nullable(row.get("valuation_status")),
+                "buy_price": _to_sql_nullable(row.get("buy_price")),
+                "sell_price": _to_sql_nullable(row.get("sell_price")),
+                "suggested_allocation_pct": _to_sql_nullable(row.get("suggested_allocation_pct")),
+                "market_regime": _to_sql_nullable(row.get("market_regime")),
+            }
+            conn.execute(
+                insert_sql,
+                {
+                    "scan_date": str(scan_date),
+                    "symbol": row["symbol"],
+                    "rank_position": rank,
+                    "signal_type": "BUY",
+                    "total_score": round(float(row["xgboost_score"]) * 5, 2),
+                    "breakout_pass": 0,
+                    "acceleration_pass": 0,
+                    "peg_pass": 1 if row.get("valuation_status") == "UNDERVALUED" else 0,
+                    "dupont_pass": 0,
+                    "ml_confidence": round(float(row["xgboost_score"]), 3),
+                    "current_price": float(row["latest_close"]),
+                    "support_1": _to_sql_nullable(row.get("buy_price")),
+                    "support_2": None,
+                    "resistance_1": _to_sql_nullable(row.get("sell_price")),
+                    "resistance_2": None,
+                    "pe_ratio": _to_sql_nullable(row.get("pe_ratio")),
+                    "peg_ratio": None,
+                    "pb_ratio": None,
+                    "roe": None,
+                    "strategy_details": json.dumps(strategy_details, ensure_ascii=False, default=str),
+                },
+            )
+
+    print(f"✅ 已將 ml_strategy Top {len(top_df)} 存入 daily_recommendations (scan_date={scan_date})")
+    return len(top_df)
+
+
 @lru_cache(maxsize=1)
 def _get_model() -> StrategyModel:
     model = StrategyModel.load()
@@ -351,7 +585,7 @@ def calculate_v30_features(df: pd.DataFrame) -> pd.DataFrame:
     return features
 
 
-def run_xgboost_inference(features_df: pd.DataFrame, symbol: str) -> float:
+def run_xgboost_inference(features_df: pd.DataFrame, symbol: str, log_missing_features: bool = True) -> float:
     if features_df.empty:
         raise ValueError(f"{symbol} 無可用特徵資料，無法執行推論")
 
@@ -369,7 +603,7 @@ def run_xgboost_inference(features_df: pd.DataFrame, symbol: str) -> float:
     prediction_frame = latest_data[model.feature_names].apply(pd.to_numeric, errors="coerce").fillna(0.0)
     probability = float(model.predict_proba(prediction_frame)[0][1])
 
-    if missing_features:
+    if missing_features and log_missing_features:
         display = ", ".join(missing_features[:8])
         suffix = " ..." if len(missing_features) > 8 else ""
         print(f"[WARN] [{symbol}] 以 0 補齊 {len(missing_features)} 個缺失特徵: {display}{suffix}")
@@ -377,7 +611,11 @@ def run_xgboost_inference(features_df: pd.DataFrame, symbol: str) -> float:
     return round(probability, 4)
 
 
-def evaluate_symbol(symbol: str) -> dict | None:
+def evaluate_symbol(
+    symbol: str,
+    fundamentals_lookup: dict[str, dict] | None = None,
+    market_regime: str = "BULL_MARKET",
+) -> dict | None:
     df = load_data_from_db(symbol)
     if df.empty:
         return None
@@ -389,22 +627,53 @@ def evaluate_symbol(symbol: str) -> dict | None:
 
     score = run_xgboost_inference(features_df, symbol)
     latest_row = features_df.iloc[-1]
+    latest_close = round(float(latest_row["close"]), 4)
+    fundamentals = (fundamentals_lookup or {}).get(symbol.upper(), {})
+    eps_ttm = _derive_eps_ttm(latest_close, fundamentals)
+    valuation = calculate_valuation_targets(current_price=latest_close, eps_ttm=eps_ttm)
+    sizing = calculate_position_size(
+        total_equity=SCREENING_EQUITY_BASE,
+        is_bear_market=market_regime == BEAR_MARKET,
+    )
+
     return {
         "symbol": symbol,
         "latest_date": features_df.index[-1].strftime("%Y-%m-%d"),
-        "latest_close": round(float(latest_row["close"]), 4),
+        "latest_close": latest_close,
         "xgboost_score": score,
         "xgboost_runtime": XGBOOST_RUNTIME,
+        "market_regime": market_regime,
+        "eps_ttm": round(float(eps_ttm), 4) if eps_ttm is not None else None,
+        "pe_ratio": fundamentals.get("pe_ratio"),
+        "forward_pe": fundamentals.get("forward_pe"),
+        "valuation_status": valuation["valuation_status"],
+        "valuation_supported": valuation["valuation_supported"],
+        "current_pe": valuation["current_pe"],
+        "fair_price": valuation["fair_price"],
+        "buy_price": valuation["buy_price"],
+        "sell_price": valuation["sell_price"],
+        "suggested_position_value": sizing["max_position_value"],
+        "suggested_allocation_pct": round(float(sizing["allocation_pct"]) * 100, 2),
     }
 
 
 def run_daily_screener(symbols: list[str] | None = None) -> pd.DataFrame:
     print("啟動 XGBoost 策略初篩引擎 (V35-Local DaaS)...")
     results: list[dict] = []
+    symbol_list = [symbol.upper() for symbol in (symbols or UNIVERSE_TICKERS)]
+    spy_df = load_data_from_db("SPY")
+    market_regime = get_market_regime(spy_df) if not spy_df.empty else "BULL_MARKET"
+    fundamentals_lookup = _load_latest_fundamentals(symbol_list)
 
-    for symbol in symbols or UNIVERSE_TICKERS:
+    print(f"[INFO] 市場 regime: {market_regime}")
+
+    for symbol in symbol_list:
         try:
-            result = evaluate_symbol(symbol)
+            result = evaluate_symbol(
+                symbol,
+                fundamentals_lookup=fundamentals_lookup,
+                market_regime=market_regime,
+            )
             if result is None:
                 continue
 
@@ -426,11 +695,22 @@ def run_daily_screener(symbols: list[str] | None = None) -> pd.DataFrame:
 
     if len(review_indices) > 0:
         sentiment_agent = SentimentAgent()
-        for index in review_indices:
-            sentiment = sentiment_agent.analyze_sentiment(results_df.at[index, "symbol"])
-            results_df.at[index, "ai_score"] = sentiment["score"]
-            results_df.at[index, "ai_reason"] = sentiment["reason"]
-            results_df.at[index, "ai_reviewed"] = True
+        for position, index in enumerate(review_indices):
+            symbol = results_df.at[index, "symbol"]
+            try:
+                sentiment = sentiment_agent.analyze_sentiment(symbol)
+                results_df.at[index, "ai_score"] = sentiment["score"]
+                results_df.at[index, "ai_reason"] = sentiment["reason"]
+                results_df.at[index, "ai_reviewed"] = True
+            except Exception as error:
+                print(f"[WARN] [{symbol}] AI 審查失敗: {error}")
+                results_df.at[index, "ai_score"] = 0.5
+                results_df.at[index, "ai_reason"] = f"AI 審查失敗: {error}"
+                results_df.at[index, "ai_reviewed"] = True
+            finally:
+                if position < len(review_indices) - 1:
+                    print("  [Rate Limit] 等待 4.5 秒後進行下一檔審查...")
+                    time.sleep(4.5)
 
     top_reviewed_df = results_df.head(AI_REVIEW_LIMIT).reset_index(drop=True)
     remaining_df = results_df.iloc[AI_REVIEW_LIMIT:].reset_index(drop=True)
@@ -439,19 +719,11 @@ def run_daily_screener(symbols: list[str] | None = None) -> pd.DataFrame:
     if top_reviewed_df.empty:
         print("無可審查標的。")
     else:
-        print(
-            top_reviewed_df[
-                ["symbol", "latest_date", "latest_close", "xgboost_score", "ai_score", "ai_reason"]
-            ].to_string(index=False)
-        )
+        print(_build_display_frame(top_reviewed_df, include_ai=True).to_string(index=False))
 
     if not remaining_df.empty:
         print(f"\n其餘標的量化排序 ({AI_REVIEW_LIMIT + 1}-{len(results_df)} 名):")
-        print(
-            remaining_df[
-                ["symbol", "latest_date", "latest_close", "xgboost_score"]
-            ].to_string(index=False)
-        )
+        print(_build_display_frame(remaining_df, include_ai=False).to_string(index=False))
 
     return results_df
 
@@ -526,7 +798,22 @@ class MLStrategy:
 
 
 def main() -> int:
-    run_daily_screener()
+    results_df = run_daily_screener()
+    if results_df.empty:
+        return 0
+
+    top_n_df = results_df.head(5).copy()
+    save_daily_screener_results(results_df, top_n=5)
+
+    try:
+        from strategies.src.adapters.notifier import get_notifier
+
+        notifier = get_notifier()
+        if notifier.send_daily_screener_flex(top_n_df):
+            print("✅ 每日情報 Flex Message 已處理完成")
+    except Exception as error:
+        print(f"⚠️ Line Flex 推播失敗: {error}")
+
     return 0
 
 

@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
+import pandas as pd
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -74,6 +75,32 @@ def check_flex_structure() -> bool:
 
     preview = json.dumps(flex_msg["contents"], indent=2, ensure_ascii=False)[:500]
     print("Flex JSON preview:\n", preview, "...\n")
+
+    daily_df = pd.DataFrame([
+        {
+            "symbol": "RTX",
+            "latest_date": "2026-04-26",
+            "xgboost_score": 0.68,
+            "valuation_status": "UNDERVALUED",
+            "buy_price": 160.0,
+            "sell_price": 192.0,
+            "suggested_allocation_pct": 20.0,
+            "ai_reason": "軍工訂單強，估值仍未擴張過度",
+        },
+        {
+            "symbol": "ADBE",
+            "latest_date": "2026-04-26",
+            "xgboost_score": 0.61,
+            "valuation_status": "FAIR",
+            "buy_price": 185.0,
+            "sell_price": 279.0,
+            "suggested_allocation_pct": 20.0,
+            "ai_reason": "企業軟體現金流穩定，維持高品質",
+        },
+    ])
+    daily_flex = notifier.build_daily_screener_flex(daily_df)
+    assert daily_flex["contents"]["type"] == "carousel"
+    assert len(daily_flex["contents"]["contents"]) == 2
     return True
 
 

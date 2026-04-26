@@ -22,7 +22,11 @@ from pathlib import Path
 from typing import Dict, Optional, List
 from decimal import Decimal
 from datetime import datetime
-from utils.security import require_secret, get_secret
+
+try:
+    from utils.security import require_secret, get_secret
+except ImportError:
+    from strategies.src.utils.security import require_secret, get_secret
 
 
 class AlpacaBroker:
