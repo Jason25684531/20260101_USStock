@@ -25,10 +25,134 @@ sys.path.insert(0, str(_SRC_DIR))
 
 from screener.support_resistance import calc_support_resistance
 from config import DEFAULT_SYMBOLS, evaluate_stock_rules_v2
+from strategies.fundamental import calculate_valuation_targets
 
 
 class DailyScreener:
     """每日選股引擎"""
+
+    BUY_PRICE_SUPPORT_WEIGHT = 0.6
+    BUY_PRICE_FAIR_VALUE_WEIGHT = 0.4
+
+    @staticmethod
+    def _normalize_optional_number(value):
+        """將缺失數值正規化為 None，避免 NaN 寫入 DB 失敗。"""
+        if value is None:
+            return None
+
+        try:
+            if pd.isna(value):
+                return None
+        except TypeError:
+            pass
+
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    @classmethod
+    def _normalize_percentage(cls, value):
+        numeric = cls._normalize_optional_number(value)
+        if numeric is None:
+            return None
+        return round(numeric * 100, 4) if numeric <= 1 else round(numeric, 4)
+
+    @classmethod
+    def _blend_buy_price(cls, support_1, fair_price, fallback_buy_price):
+        normalized_support = cls._normalize_optional_number(support_1)
+        normalized_fair_price = cls._normalize_optional_number(fair_price)
+        normalized_fallback = cls._normalize_optional_number(fallback_buy_price)
+
+        if normalized_support is not None and normalized_fair_price is not None:
+            weighted_price = (
+                normalized_support * cls.BUY_PRICE_SUPPORT_WEIGHT
+                + normalized_fair_price * cls.BUY_PRICE_FAIR_VALUE_WEIGHT
+            )
+            return round(weighted_price, 4)
+
+        if normalized_support is not None:
+            return round(normalized_support, 4)
+
+        if normalized_fair_price is not None:
+            return round(normalized_fair_price, 4)
+
+        return normalized_fallback
+
+    @classmethod
+    def _derive_smart_money(cls, info: dict) -> Tuple[Optional[float], str]:
+        institutional_ownership = None
+        for field in (
+            'institutionalOwnership',
+            'institutionOwnership',
+            'heldPercentInstitutions',
+            'inst_ownership_pct',
+        ):
+            institutional_ownership = cls._normalize_percentage(info.get(field))
+            if institutional_ownership is not None:
+                break
+
+        insider_sentiment = 'NEUTRAL'
+        for field in (
+            'netInsiderSharesBuying',
+            'netInsiderSharesPurchases',
+            'netInsiderPurchases',
+            'netSharesPurchases',
+        ):
+            net_value = cls._normalize_optional_number(info.get(field))
+            if net_value is None:
+                continue
+            if net_value > 0:
+                insider_sentiment = 'BUYING'
+            elif net_value < 0:
+                insider_sentiment = 'SELLING'
+            break
+
+        return institutional_ownership, insider_sentiment
+
+    @staticmethod
+    def _build_reason_summary(strategy_details: dict, insider_sentiment: str) -> str:
+        phrase_map = {
+            'breakout': '技術面突破',
+            'acceleration': '動能加速',
+            'peg': 'PEG低估成長',
+            'dupont': '杜邦高品質',
+            'institutional': '法人籌碼支持',
+            'volume_structure': '量價結構轉強',
+            'money_flow': '資金流入改善',
+            'multi_tf_momentum': '多週期動能共振',
+            'relative_strength': '相對強勢領先',
+            'earnings_quality': '盈餘品質穩健',
+            'sector_rotation': '產業輪動受惠',
+        }
+
+        phrases = []
+        for strategy_name, phrase in phrase_map.items():
+            strategy_result = strategy_details.get(strategy_name, {})
+            if strategy_result.get('pass'):
+                phrases.append(phrase)
+
+        if insider_sentiment == 'BUYING':
+            phrases.append('🔥內部人買進')
+        elif insider_sentiment == 'SELLING':
+            phrases.append('內部人偏空調節')
+
+        if not phrases:
+            return '綜合訊號中性，待更多確認'
+
+        return ' | '.join(phrases[:5])
+
+    @staticmethod
+    def _ensure_column(conn, sql_text, column_name: str, definition_sql: str):
+        has_column = conn.execute(sql_text("""
+            SELECT COUNT(*)
+            FROM information_schema.COLUMNS
+            WHERE TABLE_SCHEMA = DATABASE()
+              AND TABLE_NAME = 'daily_recommendations'
+              AND COLUMN_NAME = :column_name
+        """), {'column_name': column_name}).scalar()
+        if not has_column:
+            conn.execute(sql_text(f"ALTER TABLE daily_recommendations ADD COLUMN {definition_sql}"))
 
     def __init__(
         self,
@@ -158,8 +282,17 @@ class DailyScreener:
             except Exception:
                 pass
 
+        target_price = self._normalize_optional_number(info.get('targetMeanPrice'))
+        institutional_ownership, insider_sentiment = self._derive_smart_money(info)
+
         close_col = 'Close' if 'Close' in df.columns else 'close'
         current_price = float(df[close_col].iloc[-1])
+        eps_ttm = self._normalize_optional_number(
+            info.get('trailingEps')
+            or info.get('epsTrailingTwelveMonths')
+            or info.get('epsCurrentYear')
+        )
+        valuation = calculate_valuation_targets(current_price=current_price, eps_ttm=eps_ttm)
 
         # --- 全策略評估（v2 Registry 版本）---
         eval_result = evaluate_stock_rules_v2(df, info, symbol=symbol)
@@ -194,6 +327,13 @@ class DailyScreener:
 
         # --- 支撐壓力 ---
         sr = calc_support_resistance(df)
+        support_1 = self._normalize_optional_number(sr.get('support_1')) if isinstance(sr, dict) else None
+
+        valuation['buy_price'] = self._blend_buy_price(
+            support_1=support_1,
+            fair_price=valuation.get('fair_price'),
+            fallback_buy_price=valuation.get('buy_price'),
+        )
 
         # --- 信號判定 ---
         # BUY: 至少 30% 策略通過 或 總分 >= 策略數的 20%
@@ -206,6 +346,9 @@ class DailyScreener:
             'signal': signal_type,
             'total_score': round(total_score, 2),
             'current_price': round(current_price, 2),
+            'target_price': target_price,
+            'institutional_ownership': institutional_ownership,
+            'insider_sentiment': insider_sentiment,
             'breakout': r_breakout,
             'acceleration': r_accel,
             'peg': r_peg,
@@ -217,6 +360,10 @@ class DailyScreener:
             'peg_ratio': info.get('pegRatio') or info.get('trailingPegRatio'),
             'pb_ratio': info.get('priceToBook'),
             'roe': info.get('returnOnEquity'),
+            'fair_price': valuation.get('fair_price'),
+            'buy_price': valuation.get('buy_price'),
+            'sell_price': valuation.get('sell_price'),
+            'valuation_status': valuation.get('valuation_status', 'FAIR'),
             'passes': passes,
             'total_strategies': total_strategies,
             'all_results': all_results,
@@ -285,12 +432,22 @@ class DailyScreener:
 
         recommendations = []
         for rank, (_, row) in enumerate(top.iterrows(), 1):
+            strategy_details = row.get('all_results') or {
+                'breakout': row['breakout'],
+                'acceleration': row['acceleration'],
+                'peg': row['peg'],
+                'dupont': row['dupont'],
+            }
+            insider_sentiment = str(row.get('insider_sentiment') or 'NEUTRAL').upper()
             rec = {
                 'rank': rank,
                 'symbol': row['symbol'],
                 'signal': row['signal'],
                 'total_score': row['total_score'],
                 'current_price': row['current_price'],
+                'target_price': self._normalize_optional_number(row.get('target_price')),
+                'institutional_ownership': self._normalize_percentage(row.get('institutional_ownership')),
+                'insider_sentiment': insider_sentiment,
                 'breakout_pass': row['breakout']['pass'],
                 'acceleration_pass': row['acceleration']['pass'],
                 'peg_pass': row['peg']['pass'],
@@ -304,13 +461,13 @@ class DailyScreener:
                 'peg_ratio': row.get('peg_ratio'),
                 'pb_ratio': row.get('pb_ratio'),
                 'roe': row.get('roe'),
-                'strategy_details': {
-                    'breakout': row['breakout'],
-                    'acceleration': row['acceleration'],
-                    'peg': row['peg'],
-                    'dupont': row['dupont'],
-                },
+                'fair_price': self._normalize_optional_number(row.get('fair_price')),
+                'buy_price': self._normalize_optional_number(row.get('buy_price')),
+                'sell_price': self._normalize_optional_number(row.get('sell_price')),
+                'valuation_status': str(row.get('valuation_status') or 'FAIR').upper(),
+                'strategy_details': strategy_details,
             }
+            rec['reason_summary'] = self._build_reason_summary(strategy_details, insider_sentiment)
             recommendations.append(rec)
 
         return recommendations
@@ -350,6 +507,9 @@ class DailyScreener:
                         dupont_pass TINYINT(1) DEFAULT 0,
                         ml_confidence DECIMAL(4,3) DEFAULT NULL,
                         current_price DECIMAL(12,4) NOT NULL,
+                        target_price DECIMAL(12,4),
+                        institutional_ownership DECIMAL(10,4),
+                        insider_sentiment VARCHAR(16) DEFAULT 'NEUTRAL',
                         support_1 DECIMAL(12,4),
                         support_2 DECIMAL(12,4),
                         resistance_1 DECIMAL(12,4),
@@ -358,30 +518,55 @@ class DailyScreener:
                         peg_ratio DECIMAL(10,4),
                         pb_ratio DECIMAL(10,2),
                         roe DECIMAL(10,4),
+                        fair_price DECIMAL(12,4),
+                        buy_price DECIMAL(12,4),
+                        sell_price DECIMAL(12,4),
+                        valuation_status VARCHAR(16) DEFAULT 'FAIR',
+                        reason_summary TEXT,
                         strategy_details JSON,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         UNIQUE KEY uk_date_symbol (scan_date, symbol),
                         INDEX idx_scan_date (scan_date)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                 """))
+
+                missing_columns = [
+                    ('target_price', 'target_price DECIMAL(12,4) NULL AFTER current_price'),
+                    ('institutional_ownership', 'institutional_ownership DECIMAL(10,4) NULL AFTER target_price'),
+                    ('insider_sentiment', "insider_sentiment VARCHAR(16) NULL DEFAULT 'NEUTRAL' AFTER institutional_ownership"),
+                    ('fair_price', 'fair_price DECIMAL(12,4) NULL AFTER roe'),
+                    ('buy_price', 'buy_price DECIMAL(12,4) NULL AFTER fair_price'),
+                    ('sell_price', 'sell_price DECIMAL(12,4) NULL AFTER buy_price'),
+                    ('valuation_status', "valuation_status VARCHAR(16) NULL DEFAULT 'FAIR' AFTER sell_price"),
+                    ('reason_summary', 'reason_summary TEXT NULL AFTER valuation_status'),
+                ]
+                for column_name, definition_sql in missing_columns:
+                    self._ensure_column(conn, sql_text, column_name, definition_sql)
                 conn.commit()
 
             # 寫入推薦結果 (UPSERT)
             with db.engine.connect() as conn:
                 for rec in recommendations:
+                    safe_float = self._normalize_optional_number
                     conn.execute(sql_text("""
                         INSERT INTO daily_recommendations
                             (scan_date, symbol, rank_position, signal_type, total_score,
                              breakout_pass, acceleration_pass, peg_pass, dupont_pass,
-                             ml_confidence, current_price,
+                                      ml_confidence, current_price, target_price,
+                                      institutional_ownership, insider_sentiment,
                              support_1, support_2, resistance_1, resistance_2,
-                             pe_ratio, peg_ratio, pb_ratio, roe, strategy_details)
+                                      pe_ratio, peg_ratio, pb_ratio, roe,
+                                      fair_price, buy_price, sell_price, valuation_status,
+                                      reason_summary, strategy_details)
                         VALUES
                             (:scan_date, :symbol, :rank, :signal, :score,
                              :bp, :ap, :pp, :dp,
-                             :ml, :price,
+                                      :ml, :price, :target_price,
+                                      :institutional_ownership, :insider_sentiment,
                              :s1, :s2, :r1, :r2,
-                             :pe, :peg, :pb, :roe, :details)
+                                      :pe, :peg, :pb, :roe,
+                                      :fair_price, :buy_price, :sell_price, :valuation_status,
+                                      :reason_summary, :details)
                         ON DUPLICATE KEY UPDATE
                             rank_position = VALUES(rank_position),
                             signal_type = VALUES(signal_type),
@@ -392,6 +577,9 @@ class DailyScreener:
                             dupont_pass = VALUES(dupont_pass),
                             ml_confidence = VALUES(ml_confidence),
                             current_price = VALUES(current_price),
+                            target_price = VALUES(target_price),
+                            institutional_ownership = VALUES(institutional_ownership),
+                            insider_sentiment = VALUES(insider_sentiment),
                             support_1 = VALUES(support_1),
                             support_2 = VALUES(support_2),
                             resistance_1 = VALUES(resistance_1),
@@ -400,6 +588,11 @@ class DailyScreener:
                             peg_ratio = VALUES(peg_ratio),
                             pb_ratio = VALUES(pb_ratio),
                             roe = VALUES(roe),
+                                fair_price = VALUES(fair_price),
+                                buy_price = VALUES(buy_price),
+                                sell_price = VALUES(sell_price),
+                                valuation_status = VALUES(valuation_status),
+                                reason_summary = VALUES(reason_summary),
                             strategy_details = VALUES(strategy_details)
                     """), {
                         'scan_date': str(scan_date),
@@ -411,16 +604,24 @@ class DailyScreener:
                         'ap': int(rec['acceleration_pass']),
                         'pp': int(rec['peg_pass']),
                         'dp': int(rec['dupont_pass']),
-                        'ml': rec.get('ml_confidence'),
-                        'price': rec['current_price'],
-                        's1': rec.get('support_1'),
-                        's2': rec.get('support_2'),
-                        'r1': rec.get('resistance_1'),
-                        'r2': rec.get('resistance_2'),
-                        'pe': rec.get('pe_ratio'),
-                        'peg': rec.get('peg_ratio'),
-                        'pb': rec.get('pb_ratio'),
-                        'roe': rec.get('roe'),
+                        'ml': safe_float(rec.get('ml_confidence')),
+                        'price': safe_float(rec.get('current_price')),
+                        'target_price': safe_float(rec.get('target_price')),
+                        'institutional_ownership': self._normalize_percentage(rec.get('institutional_ownership')),
+                        'insider_sentiment': str(rec.get('insider_sentiment') or 'NEUTRAL').upper(),
+                        's1': safe_float(rec.get('support_1')),
+                        's2': safe_float(rec.get('support_2')),
+                        'r1': safe_float(rec.get('resistance_1')),
+                        'r2': safe_float(rec.get('resistance_2')),
+                        'pe': safe_float(rec.get('pe_ratio')),
+                        'peg': safe_float(rec.get('peg_ratio')),
+                        'pb': safe_float(rec.get('pb_ratio')),
+                        'roe': safe_float(rec.get('roe')),
+                        'fair_price': safe_float(rec.get('fair_price')),
+                        'buy_price': safe_float(rec.get('buy_price')),
+                        'sell_price': safe_float(rec.get('sell_price')),
+                        'valuation_status': str(rec.get('valuation_status') or 'FAIR').upper(),
+                        'reason_summary': str(rec.get('reason_summary') or '綜合訊號中性，待更多確認'),
                         'details': json.dumps(rec.get('strategy_details', {}),
                                               ensure_ascii=False, default=str),
                     })

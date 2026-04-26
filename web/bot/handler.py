@@ -10,18 +10,35 @@ Updated: 2026-02-12 - 新增 Top5、ML 命令；Flex Message 回覆；DB 查詢�
 """
 
 import os
+import sys
+import importlib
 import hashlib
 import hmac
 import base64
 import json
+import threading
 import requests as http_requests
-from typing import Optional, List, Dict
+from pathlib import Path
+from typing import Optional, List
 from datetime import datetime
 from flask import Blueprint, request, abort, jsonify
 from functools import wraps
 
 from security import get_secret
 from db import get_engine, table_exists as _table_exists, column_exists as _column_exists
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_STRATEGIES_SRC = _PROJECT_ROOT / 'strategies' / 'src'
+_STRATEGIES_SRC_STR = str(_STRATEGIES_SRC)
+if _STRATEGIES_SRC_STR not in sys.path:
+    sys.path.insert(0, _STRATEGIES_SRC_STR)
+
+try:
+    from utils.line_flex import (
+        build_decision_bubble as _build_decision_bubble,
+    )  # type: ignore[reportMissingImports]
+except ImportError:
+    _build_decision_bubble = importlib.import_module('utils.line_flex').build_decision_bubble
 
 # ============================================
 # Blueprint & Secrets
@@ -41,6 +58,20 @@ def _get_db_engine():
     if _db_engine is None:
         _db_engine = get_engine()
     return _db_engine
+
+
+def _get_daily_screener_class():
+    """延遲匯入 DailyScreener，避免 web 啟動時路徑問題。"""
+    project_root = Path(__file__).resolve().parents[2]
+    strategies_src = project_root / 'strategies' / 'src'
+
+    for path in (project_root, strategies_src):
+        path_str = str(path)
+        if path_str not in sys.path:
+            sys.path.insert(0, path_str)
+
+    screener_engine = importlib.import_module('screener.engine')
+    return screener_engine.DailyScreener
 
 
 # ============================================
@@ -150,7 +181,7 @@ def handle_message_event(event: dict):
 
     print(f"📩 收到文字消息: '{text}' from {user_id}")
 
-    messages = process_command(text)
+    messages = process_command(text, user_id=user_id)
     if messages and reply_token:
         reply_messages(reply_token, messages)
 
@@ -182,7 +213,7 @@ def handle_follow_event(event: dict):
 # ============================================
 # 命令解析
 # ============================================
-def process_command(text: str) -> Optional[List[dict]]:
+def process_command(text: str, user_id: Optional[str] = None) -> Optional[List[dict]]:
     """
     處理用戶命令
 
@@ -191,8 +222,14 @@ def process_command(text: str) -> Optional[List[dict]]:
     """
     cmd = text.strip().lower()
 
+    # --- Web URL 查詢 ---
+    if cmd in ('web', '/web', '網址'):
+        return _cmd_web()
+
     # --- Top5 / scan 命令 ---
     if cmd in ('top5', 'top 5', '推薦', '/top5', '/scan'):
+        if user_id and user_id != 'unknown':
+            return _cmd_top5_realtime(user_id)
         return _cmd_top5()
 
     # --- Top5 基礎版（純規則，無 ML）---
@@ -270,6 +307,30 @@ def process_command(text: str) -> Optional[List[dict]]:
 
     # 非命令消息
     return None
+
+
+def _cmd_web() -> List[dict]:
+    """回傳目前 Web 戰情室對外網址。"""
+    url = (os.getenv('NGROK_URL') or '').strip()
+    if not url:
+        return [_text_msg("🌐 目前尚未設定 Web 戰情室網址，請先設定 NGROK_URL。")]
+
+    return [_text_msg(
+        f"🌐 目前的 Web 戰情室網址是：\n{url}\n\n預設帳號：admin / 密碼：admin123"
+    )]
+
+
+def _cmd_top5_realtime(user_id: str) -> List[dict]:
+    """立即回覆受理訊息，背景執行最新 Top5 掃描並主動推播。"""
+    worker = threading.Thread(
+        target=_run_screener_and_push,
+        args=(user_id,),
+        daemon=True,
+    )
+    worker.start()
+    return [_text_msg(
+        "⏳ 正在為您啟動最新的全市場掃描與 AI 運算，大約需要 1-2 分鐘，請稍候..."
+    )]
 
 
 # ============================================
@@ -664,30 +725,39 @@ def _cmd_top5() -> List[dict]:
 
             rows = conn.execute(sql_text("""
                 SELECT symbol, rank_position, signal_type, total_score,
-                       current_price, ml_confidence,
+                       current_price, target_price, ml_confidence,
+                       institutional_ownership, insider_sentiment,
+                       valuation_status, buy_price, sell_price, reason_summary,
                        support_1, resistance_1,
                        breakout_pass, acceleration_pass, peg_pass, dupont_pass
                 FROM daily_recommendations
                 WHERE scan_date = :d
                 ORDER BY rank_position ASC
                 LIMIT 5
-            """), {'d': str(latest)})
+            """), {'d': str(latest)}).mappings()
 
             recs = []
             for row in rows:
                 recs.append({
-                    'symbol': row[0],
-                    'rank': row[1],
-                    'signal': row[2],
-                    'total_score': float(row[3]) if row[3] else 0,
-                    'current_price': float(row[4]) if row[4] else 0,
-                    'ml_confidence': float(row[5]) if row[5] else 0,
-                    'support_1': float(row[6]) if row[6] else None,
-                    'resistance_1': float(row[7]) if row[7] else None,
-                    'breakout_pass': bool(row[8]),
-                    'acceleration_pass': bool(row[9]),
-                    'peg_pass': bool(row[10]),
-                    'dupont_pass': bool(row[11]),
+                    'symbol': row['symbol'],
+                    'rank': row['rank_position'],
+                    'signal': row['signal_type'],
+                    'total_score': float(row['total_score']) if row['total_score'] else 0,
+                    'current_price': float(row['current_price']) if row['current_price'] else 0,
+                    'target_price': float(row['target_price']) if row['target_price'] is not None else None,
+                    'ml_confidence': float(row['ml_confidence']) if row['ml_confidence'] else 0,
+                    'institutional_ownership': float(row['institutional_ownership']) if row['institutional_ownership'] is not None else None,
+                    'insider_sentiment': row['insider_sentiment'] or 'NEUTRAL',
+                    'valuation_status': row['valuation_status'] or 'FAIR',
+                    'buy_price': float(row['buy_price']) if row['buy_price'] is not None else None,
+                    'sell_price': float(row['sell_price']) if row['sell_price'] is not None else None,
+                    'reason_summary': row['reason_summary'] or '綜合訊號中性，待更多確認',
+                    'support_1': float(row['support_1']) if row['support_1'] else None,
+                    'resistance_1': float(row['resistance_1']) if row['resistance_1'] else None,
+                    'breakout_pass': bool(row['breakout_pass']),
+                    'acceleration_pass': bool(row['acceleration_pass']),
+                    'peg_pass': bool(row['peg_pass']),
+                    'dupont_pass': bool(row['dupont_pass']),
                 })
 
             if not recs:
@@ -732,20 +802,22 @@ def _cmd_top5_basic() -> List[dict]:
 
             rows = conn.execute(sql_text("""
                 SELECT symbol, rank_position, signal_type, total_score,
-                       current_price, ml_confidence,
+                       current_price, target_price, ml_confidence,
+                       institutional_ownership, insider_sentiment,
+                       valuation_status, buy_price, sell_price, reason_summary,
                        support_1, resistance_1,
                        breakout_pass, acceleration_pass, peg_pass, dupont_pass
                 FROM daily_recommendations
                 WHERE scan_date = :d
                 ORDER BY rank_position ASC
                 LIMIT 5
-            """), {'d': str(latest)})
+            """), {'d': str(latest)}).mappings()
 
             recs = []
             for row in rows:
                 # 計算純規則評分（不考慮 ML 加權）
-                ml_conf = float(row[5]) if row[5] else 0
-                total_score = float(row[3]) if row[3] else 0
+                ml_conf = float(row['ml_confidence']) if row['ml_confidence'] else 0
+                total_score = float(row['total_score']) if row['total_score'] else 0
                 
                 # 反推原始規則分：如果有 ML 加權，除回去
                 if ml_conf > 0:
@@ -754,18 +826,25 @@ def _cmd_top5_basic() -> List[dict]:
                     rule_score = total_score
                 
                 recs.append({
-                    'symbol': row[0],
-                    'rank': row[1],
-                    'signal': row[2],
+                    'symbol': row['symbol'],
+                    'rank': row['rank_position'],
+                    'signal': row['signal_type'],
                     'total_score': round(rule_score, 2),  # 使用純規則分
-                    'current_price': float(row[4]) if row[4] else 0,
+                    'current_price': float(row['current_price']) if row['current_price'] else 0,
+                    'target_price': float(row['target_price']) if row['target_price'] is not None else None,
                     'ml_confidence': 0,  # 強制顯示 0（無 ML）
-                    'support_1': float(row[6]) if row[6] else None,
-                    'resistance_1': float(row[7]) if row[7] else None,
-                    'breakout_pass': bool(row[8]),
-                    'acceleration_pass': bool(row[9]),
-                    'peg_pass': bool(row[10]),
-                    'dupont_pass': bool(row[11]),
+                    'institutional_ownership': float(row['institutional_ownership']) if row['institutional_ownership'] is not None else None,
+                    'insider_sentiment': row['insider_sentiment'] or 'NEUTRAL',
+                    'valuation_status': row['valuation_status'] or 'FAIR',
+                    'buy_price': float(row['buy_price']) if row['buy_price'] is not None else None,
+                    'sell_price': float(row['sell_price']) if row['sell_price'] is not None else None,
+                    'reason_summary': row['reason_summary'] or '綜合訊號中性，待更多確認',
+                    'support_1': float(row['support_1']) if row['support_1'] else None,
+                    'resistance_1': float(row['resistance_1']) if row['resistance_1'] else None,
+                    'breakout_pass': bool(row['breakout_pass']),
+                    'acceleration_pass': bool(row['acceleration_pass']),
+                    'peg_pass': bool(row['peg_pass']),
+                    'dupont_pass': bool(row['dupont_pass']),
                 })
 
             if not recs:
@@ -873,82 +952,8 @@ def _build_top5_flex(recs: list, scan_date: str) -> dict:
 
 
 def _build_bubble(rec: dict) -> dict:
-    """建構單支股票的 Flex Bubble"""
-    signal = rec.get('signal', 'N/A')
-    signal_color = "#00C853" if signal == 'BUY' else "#FF1744"
-    ml_conf = rec.get('ml_confidence', 0) or 0
-    ml_str = f"{ml_conf:.0%}" if ml_conf > 0 else "—"
-
-    strats = []
-    if rec.get('breakout_pass'):
-        strats.append("突破")
-    if rec.get('acceleration_pass'):
-        strats.append("加速")
-    if rec.get('peg_pass'):
-        strats.append("PEG")
-    if rec.get('dupont_pass'):
-        strats.append("杜邦")
-
-    body_rows = [
-        _flex_kv("💰 價格", f"${rec['current_price']:.2f}"),
-        _flex_kv("📊 評分", f"{rec['total_score']:.1f}/5"),
-        _flex_kv("🤖 ML", ml_str),
-        _flex_kv("✅ 策略", " | ".join(strats) if strats else "—"),
-    ]
-
-    s1 = rec.get('support_1')
-    r1 = rec.get('resistance_1')
-    if s1:
-        body_rows.append(_flex_kv("📉 支撐", f"${s1:.2f}"))
-    if r1:
-        body_rows.append(_flex_kv("📈 壓力", f"${r1:.2f}"))
-
-    return {
-        "type": "bubble",
-        "size": "kilo",
-        "header": {
-            "type": "box",
-            "layout": "horizontal",
-            "contents": [
-                {
-                    "type": "text",
-                    "text": f"#{rec['rank']} {rec['symbol']}",
-                    "weight": "bold",
-                    "size": "lg",
-                    "color": "#FFFFFF",
-                },
-                {
-                    "type": "text",
-                    "text": signal,
-                    "weight": "bold",
-                    "size": "sm",
-                    "align": "end",
-                    "color": "#FFFFFF",
-                },
-            ],
-            "backgroundColor": signal_color,
-            "paddingAll": "15px",
-        },
-        "body": {
-            "type": "box",
-            "layout": "vertical",
-            "contents": body_rows,
-            "spacing": "sm",
-            "paddingAll": "13px",
-        },
-    }
-
-
-def _flex_kv(label: str, value: str) -> dict:
-    """建構 Flex 鍵值對行"""
-    return {
-        "type": "box",
-        "layout": "horizontal",
-        "contents": [
-            {"type": "text", "text": label, "size": "sm", "color": "#555555", "flex": 0},
-            {"type": "text", "text": value, "size": "sm", "color": "#111111", "align": "end"},
-        ],
-    }
+    """建構單支股票的三層決策 Flex Bubble。"""
+    return _build_decision_bubble(rec)
 
 
 # ============================================
@@ -990,6 +995,56 @@ def reply_messages(reply_token: str, messages: List[dict]):
             print(f"❌ 消息回覆失敗: {resp.status_code} - {resp.text}")
     except Exception as e:
         print(f"❌ 回覆請求失敗: {e}")
+
+
+def push_message(user_id: str, messages: List[dict]) -> bool:
+    """主動推播消息給指定 LINE 使用者。"""
+    if not CHANNEL_TOKEN:
+        print("⚠️  Channel Token 未配置，無法主動推播")
+        return False
+
+    try:
+        resp = http_requests.post(
+            "https://api.line.me/v2/bot/message/push",
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {CHANNEL_TOKEN}",
+            },
+            json={
+                "to": user_id,
+                "messages": messages[:5],
+            },
+            timeout=15,
+        )
+        if resp.status_code == 200:
+            print(f"✅ Push 成功: {user_id}")
+            return True
+
+        print(f"❌ Push 失敗: {resp.status_code} - {resp.text}")
+    except Exception as e:
+        print(f"❌ Push 請求失敗: {e}")
+
+    return False
+
+
+def _run_screener_and_push(user_id: str):
+    """背景執行最新全市場掃描，完成後主動推播 Top5。"""
+    try:
+        DailyScreener = _get_daily_screener_class()
+        screener = DailyScreener(use_ml=True)
+        df_all = screener.scan_all()
+        recommendations = screener.get_top_recommendations(df_all, n=5)
+
+        if not recommendations:
+            push_message(user_id, [_text_msg("📊 最新掃描未產生可用推薦結果。")])
+            return
+
+        screener.save_to_db(recommendations)
+        flex = _build_top5_flex(recommendations, datetime.now().strftime('%Y-%m-%d'))
+        push_message(user_id, [flex])
+    except Exception as e:
+        print(f"❌ 背景 Top5 掃描失敗: {type(e).__name__}: {e}")
+        push_message(user_id, [_text_msg(f"❌ 最新掃描失敗: {e}")])
 
 
 # ============================================

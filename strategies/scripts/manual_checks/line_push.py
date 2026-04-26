@@ -16,6 +16,8 @@ WEB_ROOT = PROJECT_ROOT / "web"
 if str(STRATEGIES_SRC) not in sys.path:
     sys.path.insert(0, str(STRATEGIES_SRC))
 
+from utils.line_flex import flex_kv
+
 load_dotenv(dotenv_path=PROJECT_ROOT / ".env")
 
 
@@ -31,13 +33,14 @@ def check_flex_structure() -> bool:
             "signal": "BUY",
             "total_score": 3.50,
             "current_price": 42.15,
+            "target_price": 48.00,
+            "buy_price": 40.50,
+            "sell_price": 49.25,
+            "valuation_status": "UNDERVALUED",
+            "institutional_ownership": 0.71,
+            "insider_sentiment": "BUYING",
             "ml_confidence": 0.65,
-            "breakout_pass": True,
-            "acceleration_pass": True,
-            "peg_pass": False,
-            "dupont_pass": True,
-            "support_1": 40.50,
-            "resistance_1": 44.20,
+            "reason_summary": "技術面突破 | 法人籌碼支持 | 🔥內部人買進",
         },
         {
             "rank": 2,
@@ -45,21 +48,23 @@ def check_flex_structure() -> bool:
             "signal": "BUY",
             "total_score": 3.20,
             "current_price": 108.30,
+            "target_price": 115.80,
+            "buy_price": 105.00,
+            "sell_price": 116.50,
+            "valuation_status": "FAIR",
+            "institutional_ownership": 0.64,
+            "insider_sentiment": "NEUTRAL",
             "ml_confidence": 0.58,
-            "breakout_pass": True,
-            "acceleration_pass": False,
-            "peg_pass": True,
-            "dupont_pass": True,
-            "support_1": 105.00,
-            "resistance_1": 112.00,
+            "reason_summary": "量價結構轉強 | 相對強勢領先",
         },
     ]
 
     bubble = notifier._build_stock_bubble(mock_recs[0])
     assert bubble["type"] == "bubble"
     assert bubble["header"]["backgroundColor"] == "#00C853"
+    assert bubble["footer"]["contents"][1]["text"] == "💡 推薦理由"
 
-    kv = LineNotifier._flex_kv("Score", "3.5/5")
+    kv = flex_kv("Score", "3.5/5")
     assert kv["type"] == "box"
     assert kv["layout"] == "horizontal"
     assert len(kv["contents"]) == 2

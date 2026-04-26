@@ -11,15 +11,31 @@ Updated: 2026-02-12 - 新增 Flex Message 推薦報告
 """
 
 import json
+import sys
+from pathlib import Path
 import requests
 from datetime import datetime, date
 from typing import Optional, Dict, List
 
 import pandas as pd
 
+_PROJECT_ROOT = Path(__file__).resolve().parents[3]
+_STRATEGIES_SRC = _PROJECT_ROOT / 'strategies' / 'src'
+_STRATEGIES_SRC_STR = str(_STRATEGIES_SRC)
+if _STRATEGIES_SRC_STR not in sys.path:
+    sys.path.insert(0, _STRATEGIES_SRC_STR)
+
 try:
+    from utils.line_flex import (
+        build_decision_bubble,
+        flex_kv,
+    )
     from utils.security import get_secret
 except ImportError:
+    from strategies.src.utils.line_flex import (
+        build_decision_bubble,
+        flex_kv,
+    )
     from strategies.src.utils.security import get_secret
 
 
@@ -296,9 +312,9 @@ class LineNotifier:
         ai_reason = str(rec.get("ai_reason") or "未提供 AI 摘要")[:60]
 
         body_rows = [
-            self._flex_kv("AI 勝率", f"{float(xgboost_score):.2f}" if xgboost_score is not None else "N/A"),
-            self._flex_kv("建議買入價", f"< ${float(buy_price):.2f}" if buy_price is not None else "N/A"),
-            self._flex_kv("建議資金佔比", f"{float(suggested_allocation_pct):.1f}%" if suggested_allocation_pct is not None else "N/A"),
+            flex_kv("AI 勝率", f"{float(xgboost_score):.2f}" if xgboost_score is not None else "N/A"),
+            flex_kv("建議買入價", f"< ${float(buy_price):.2f}" if buy_price is not None else "N/A"),
+            flex_kv("建議資金佔比", f"{float(suggested_allocation_pct):.1f}%" if suggested_allocation_pct is not None else "N/A"),
         ]
 
         return {
@@ -342,92 +358,7 @@ class LineNotifier:
         Returns:
             LINE Flex Bubble JSON dict
         """
-        signal = rec.get('signal', 'N/A')
-        signal_color = "#00C853" if signal == 'BUY' else "#FF1744"
-        ml_conf = rec.get('ml_confidence', 0) or 0
-        ml_str = f"{ml_conf:.0%}" if ml_conf > 0 else "—"
-
-        # 策略通過指標
-        strats = []
-        if rec.get('breakout_pass'):
-            strats.append("突破")
-        if rec.get('acceleration_pass'):
-            strats.append("加速")
-        if rec.get('peg_pass'):
-            strats.append("PEG")
-        if rec.get('dupont_pass'):
-            strats.append("杜邦")
-
-        body_rows = [
-            self._flex_kv("💰 價格", f"${rec['current_price']:.2f}"),
-            self._flex_kv("📊 評分", f"{rec['total_score']:.1f}/5"),
-            self._flex_kv("🤖 ML 信心度", ml_str),
-            self._flex_kv("✅ 策略", " | ".join(strats) if strats else "—"),
-        ]
-
-        s1 = rec.get('support_1')
-        r1 = rec.get('resistance_1')
-        if s1:
-            body_rows.append(self._flex_kv("📉 支撐", f"${s1:.2f}"))
-        if r1:
-            body_rows.append(self._flex_kv("📈 壓力", f"${r1:.2f}"))
-
-        return {
-            "type": "bubble",
-            "size": "kilo",
-            "header": {
-                "type": "box",
-                "layout": "horizontal",
-                "contents": [
-                    {
-                        "type": "text",
-                        "text": f"#{rec.get('rank', '?')} {rec['symbol']}",
-                        "weight": "bold",
-                        "size": "lg",
-                        "color": "#FFFFFF",
-                    },
-                    {
-                        "type": "text",
-                        "text": signal,
-                        "weight": "bold",
-                        "size": "sm",
-                        "align": "end",
-                        "color": "#FFFFFF",
-                    },
-                ],
-                "backgroundColor": signal_color,
-                "paddingAll": "15px",
-            },
-            "body": {
-                "type": "box",
-                "layout": "vertical",
-                "contents": body_rows,
-                "spacing": "sm",
-                "paddingAll": "13px",
-            },
-        }
-
-    @staticmethod
-    def _flex_kv(label: str, value: str) -> Dict:
-        """
-        建構 Flex Message 鍵值對行
-
-        Args:
-            label: 左側標籤
-            value: 右側數值
-
-        Returns:
-            LINE Flex Box JSON dict
-        """
-        return {
-            "type": "box",
-            "layout": "horizontal",
-            "contents": [
-                {"type": "text", "text": label, "size": "sm", "color": "#555555", "flex": 0},
-                {"type": "text", "text": value, "size": "sm", "color": "#111111", "align": "end"},
-            ],
-        }
-
+        return build_decision_bubble(rec)
 
 # 全局通知器實例
 _notifier: Optional[LineNotifier] = None
