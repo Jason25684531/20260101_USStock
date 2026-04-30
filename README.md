@@ -17,7 +17,7 @@
 1. `strategy_engine` 讀取市場資料與基本面資料，產生策略訊號與回測結果
 2. `db` 儲存 market_data / trade_logs / backtest_runs / recommendations 等表
 3. `web_dashboard` 透過 API 查詢 DB，提供 Dashboard 與 LineBot 回覆
-4. LineBot 由 Webhook `/callback` 接收事件並回應
+4. LineBot 由 Webhook `/callback` 接收事件並回應4
 
 ## 資料夾結構
 - `strategies/` 策略引擎與回測邏輯

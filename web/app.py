@@ -10,11 +10,13 @@ Updated: 2026-01-31 - 添加 Line Bot 整合
 """
 import os
 import json
+import logging
 from dotenv import load_dotenv
 from flask import Flask, render_template, jsonify
 from flask_httpauth import HTTPBasicAuth
 from werkzeug.security import check_password_hash, generate_password_hash
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 from datetime import datetime
 
 load_dotenv()
@@ -43,6 +45,68 @@ engine = get_engine(DB_CONFIG, echo=False)
 # Aliases for backward compatibility (previously defined locally)
 _table_exists = table_exists
 _column_exists = column_exists
+
+RECOVERABLE_DASHBOARD_DB_ERROR_CODES = {1049, 1054, 1146, 2003}
+RECOVERABLE_DASHBOARD_DB_ERROR_MARKERS = (
+    "can't connect to mysql server",
+    "unknown column",
+    "doesn't exist",
+    "unknown table",
+    "connection refused",
+)
+
+
+def _extract_db_error_code(error):
+    """Extract a database error code from wrapped DB exceptions when available."""
+    candidates = [error, getattr(error, 'orig', None)]
+    for candidate in candidates:
+        if candidate is None:
+            continue
+
+        errno = getattr(candidate, 'errno', None)
+        if isinstance(errno, int):
+            return errno
+
+        args = getattr(candidate, 'args', ())
+        for value in args:
+            if isinstance(value, int):
+                return value
+    return None
+
+
+def _is_recoverable_dashboard_error(error):
+    """Return True when a dashboard read endpoint can safely degrade."""
+    if not isinstance(error, SQLAlchemyError):
+        return False
+
+    error_code = _extract_db_error_code(error)
+    if error_code in RECOVERABLE_DASHBOARD_DB_ERROR_CODES:
+        return True
+
+    message = str(error).lower()
+    return any(marker in message for marker in RECOVERABLE_DASHBOARD_DB_ERROR_MARKERS)
+
+
+def _dashboard_degraded_response(endpoint_name, payload, error):
+    """Return a stable response payload for recoverable dashboard data failures."""
+    body = dict(payload)
+    body['degraded'] = True
+    body['warning'] = f'{endpoint_name} data temporarily unavailable'
+    app.logger.warning('%s degraded: %s', endpoint_name, error)
+    return jsonify(body)
+
+
+def _dashboard_failure_response(endpoint_name, error):
+    """Return a structured error response for unrecoverable failures."""
+    app.logger.exception('%s failed', endpoint_name)
+    return jsonify({'error': f'{endpoint_name} failed'}), 500
+
+
+def _handle_dashboard_exception(endpoint_name, payload, error):
+    """Convert known read-only dashboard failures into stable empty states."""
+    if _is_recoverable_dashboard_error(error):
+        return _dashboard_degraded_response(endpoint_name, payload, error)
+    return _dashboard_failure_response(endpoint_name, error)
 
 # ============================================
 # Web 認證配置
@@ -82,8 +146,13 @@ def get_strategies():
     Returns:
         JSON 列表，包含所有回測運行的信息
     """
+    empty_payload = []
+
     try:
         with engine.connect() as conn:
+            if not _table_exists(conn, 'backtest_runs'):
+                return jsonify(empty_payload)
+
             query = text("""
                 SELECT 
                     id,
@@ -116,7 +185,7 @@ def get_strategies():
             return jsonify(strategies)
             
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return _handle_dashboard_exception('strategies', {'strategies': empty_payload}, e)
 
 
 @app.route('/api/run/<int:run_id>/equity')
@@ -336,9 +405,13 @@ def get_recommendations():
 
     req_date = flask_request.args.get('date')
     limit = flask_request.args.get('limit', 10, type=int)
+    empty_payload = {'recommendations': []}
 
     try:
         with engine.connect() as conn:
+            if not _table_exists(conn, 'daily_recommendations'):
+                return jsonify(empty_payload)
+
             enhanced_exprs = []
             for col in [
                 'institutional_pass',
@@ -364,7 +437,7 @@ def get_recommendations():
                     "SELECT MAX(scan_date) FROM daily_recommendations"
                 )).scalar()
                 if not latest:
-                    return jsonify([])
+                    return jsonify(empty_payload)
                 date_filter = "scan_date = :target_date"
                 params = {'target_date': str(latest), 'limit': limit}
 
@@ -420,7 +493,7 @@ def get_recommendations():
             return jsonify({'recommendations': recs})
 
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return _handle_dashboard_exception('recommendations', empty_payload, e)
 
 
 # ============================================
@@ -556,17 +629,24 @@ def get_portfolio():
     Returns:
         JSON: {holdings:[...], summary:{cash, equity, positions_value}}
     """
+    empty_payload = {'holdings': []}
+
     try:
         with engine.connect() as conn:
+            if not _table_exists(conn, 'trade_logs'):
+                return jsonify(empty_payload)
+
             has_confidence = _column_exists(conn, 'trade_logs', 'confidence')
             conf_expr = 't.confidence' if has_confidence else 'NULL AS confidence'
 
             # 尚未出場的持倉
+            strategy_expr = 'r.strategy_name' if _table_exists(conn, 'backtest_runs') else 'NULL AS strategy_name'
+            join_clause = 'LEFT JOIN backtest_runs r ON t.run_id = r.id' if _table_exists(conn, 'backtest_runs') else ''
             rows = conn.execute(text(f"""
                 SELECT t.symbol, t.entry_date, t.entry_price, {conf_expr},
-                       r.strategy_name
+                       {strategy_expr}
                 FROM trade_logs t
-                JOIN backtest_runs r ON t.run_id = r.id
+                {join_clause}
                 WHERE t.exit_date IS NULL
                 ORDER BY t.entry_date DESC
             """))
@@ -609,7 +689,7 @@ def get_portfolio():
             return jsonify({'holdings': holdings})
 
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return _handle_dashboard_exception('portfolio', empty_payload, e)
 
 
 # ============================================
@@ -624,6 +704,8 @@ def get_macro():
     Returns:
         JSON: {regime:{...}, indicators:{vix, yield_curve, unemployment, fed_rate, cpi}}
     """
+    empty_payload = {'regime': None, 'indicators': {}}
+
     try:
         with engine.connect() as conn:
             # 最新 Regime
@@ -720,7 +802,7 @@ def get_macro():
             })
 
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return _handle_dashboard_exception('macro', empty_payload, e)
 
 
 # ============================================
@@ -735,6 +817,8 @@ def get_sectors():
     Returns:
         JSON: {report_date, sectors:[{sector, etf, return_20d, return_63d, return_252d, rank}]}
     """
+    empty_payload = {'report_date': None, 'sectors': []}
+
     try:
         with engine.connect() as conn:
             if _table_exists(conn, 'sector_momentum'):
@@ -835,7 +919,7 @@ def get_sectors():
             return jsonify({'report_date': str(latest_scan), 'sectors': sectors, 'source': 'daily_recommendations_fallback'})
 
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return _handle_dashboard_exception('sectors', empty_payload, e)
 
 
 # ============================================
@@ -845,15 +929,20 @@ def get_sectors():
 @auth.login_required
 def get_recommendation_dates():
     """取得所有有推薦資料的日期列表"""
+    empty_payload = {'dates': []}
+
     try:
         with engine.connect() as conn:
+            if not _table_exists(conn, 'daily_recommendations'):
+                return jsonify(empty_payload)
+
             rows = conn.execute(text(
                 "SELECT DISTINCT scan_date FROM daily_recommendations ORDER BY scan_date DESC LIMIT 60"
             ))
             dates = [str(row[0]) for row in rows]
             return jsonify({'dates': dates})
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return _handle_dashboard_exception('recommendation_dates', empty_payload, e)
 
 
 if __name__ == '__main__':

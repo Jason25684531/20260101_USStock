@@ -18,6 +18,10 @@
     </div>
 </nav>
 
+<div class="container-fluid mt-3 d-none" id="backendStatusBanner">
+    <div class="alert backend-status-alert mb-0" id="backendStatusText"></div>
+</div>
+
 <!-- ========== Tab Navigation ========== -->
 <div class="bg-white border-bottom sticky-top">
     <div class="container-fluid">
@@ -270,6 +274,7 @@
 let equityChart = null;
 let sectorPieChart = null;
 let strategies = [];
+const backendWarnings = new Map();
 
 document.addEventListener('DOMContentLoaded', () => {
     loadRecDates();
@@ -308,6 +313,30 @@ function heatColor(val) {
     return 'background:#ef9a9a;color:#b71c1c';
 }
 
+function renderBackendStatus() {
+    const banner = document.getElementById('backendStatusBanner');
+    const text = document.getElementById('backendStatusText');
+    const messages = Array.from(backendWarnings.values());
+
+    if (!messages.length) {
+        banner.classList.add('d-none');
+        text.textContent = '';
+        return;
+    }
+
+    text.textContent = '後端狀態: ' + messages.join(' | ');
+    banner.classList.remove('d-none');
+}
+
+function syncBackendStatus(key, payload, fallbackMessage) {
+    if (payload && payload.degraded) {
+        backendWarnings.set(key, payload.warning || fallbackMessage || `${key} 暫時不可用`);
+    } else {
+        backendWarnings.delete(key);
+    }
+    renderBackendStatus();
+}
+
 // ============================================
 // Recommendations
 // ============================================
@@ -315,6 +344,7 @@ async function loadRecDates() {
     try {
         const resp = await fetch('/api/recommendations/dates');
         const data = await resp.json();
+        syncBackendStatus('recommendation_dates', data, '推薦日期資料暫時不可用');
         const sel = document.getElementById('recDateSelect');
         sel.innerHTML = '<option value="">最新</option>';
         (data.dates || []).forEach(d => {
@@ -332,6 +362,7 @@ async function loadRecommendations() {
         if (dateVal) url += '&date=' + dateVal;
         const resp = await fetch(url);
         const data = await resp.json();
+        syncBackendStatus('recommendations', data, '推薦資料暫時不可用');
         const tbody = document.getElementById('recBody');
         const recs = data.recommendations || data || [];
 
@@ -474,6 +505,7 @@ async function loadPortfolio() {
     try {
         const resp = await fetch('/api/portfolio');
         const data = await resp.json();
+        syncBackendStatus('portfolio', data, '持倉資料暫時不可用');
         const holdings = data.holdings || [];
         const tbody = document.getElementById('portfolioBody');
 
@@ -539,7 +571,9 @@ function buildSectorPie(holdings) {
 async function loadBacktestList() {
     try {
         const resp = await fetch('/api/strategies');
-        strategies = await resp.json();
+        const data = await resp.json();
+        syncBackendStatus('strategies', data, '回測資料暫時不可用');
+        strategies = data.strategies || data || [];
         const container = document.getElementById('backtestList');
 
         if (!strategies.length) {
@@ -608,6 +642,7 @@ async function loadMacro() {
     try {
         const resp = await fetch('/api/macro');
         const data = await resp.json();
+        syncBackendStatus('macro', data, '宏觀資料暫時不可用');
 
         if (data.regime) {
             const r = data.regime;
@@ -636,6 +671,7 @@ async function loadSectors() {
     try {
         const resp = await fetch('/api/sectors');
         const data = await resp.json();
+        syncBackendStatus('sectors', data, '產業資料暫時不可用');
         const tbody = document.getElementById('sectorBody');
         const sectors = data.sectors || [];
 

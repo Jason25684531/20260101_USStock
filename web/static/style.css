@@ -38,6 +38,14 @@ body {
     box-shadow: 0 10px 30px rgba(0,0,0,0.35);
 }
 
+.backend-status-alert {
+    background: rgba(255, 184, 77, 0.14);
+    border: 1px solid rgba(255, 184, 77, 0.45);
+    color: #ffd89a;
+    border-radius: 12px;
+    box-shadow: 0 12px 28px rgba(0,0,0,0.18);
+}
+
 /* Nav Tabs */
 .nav-tabs .nav-link {
     color: var(--text-secondary);
