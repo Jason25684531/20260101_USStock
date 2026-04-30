@@ -158,3 +158,4 @@ python strategies/scripts/manual_checks/line_push.py --send
 - `LINEBOT_SETUP.md`
 - `LINEBOT_TROUBLESHOOTING.md`
 - `doc/updatelist.md`
+d

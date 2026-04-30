@@ -7,6 +7,7 @@
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="/static/style.css" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <script src="https://unpkg.com/lightweight-charts@4.2.2/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
 
@@ -27,6 +28,7 @@
     <div class="container-fluid">
         <ul class="nav nav-tabs border-0" id="mainTabs" role="tablist">
             <li class="nav-item"><a class="nav-link active" data-bs-toggle="tab" href="#tab-rec" role="tab">🏆 推薦</a></li>
+            <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-war-room" role="tab">🧭 個股健檢</a></li>
             <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-portfolio" role="tab">💼 持倉</a></li>
             <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-backtest" role="tab">📊 回測</a></li>
             <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-macro" role="tab">🌍 宏觀</a></li>
@@ -38,6 +40,127 @@
 <!-- ========== Tab Content ========== -->
 <div class="container-fluid mt-3">
 <div class="tab-content" id="mainTabContent">
+
+<!-- ======================== TAB: 個股健檢 ======================== -->
+<div class="tab-pane fade" id="tab-war-room" role="tabpanel">
+    <div class="card war-room-shell">
+        <div class="card-body p-3 p-lg-4">
+            <div class="war-room-topbar mb-3">
+                <div>
+                    <div class="war-room-brand">
+                        <span class="war-room-logo-dot war-room-logo-dot-primary"></span>
+                        <span class="war-room-logo-dot war-room-logo-dot-secondary"></span>
+                        <span class="fw-bold fs-5">策略指揮中心 Strategy Control</span>
+                    </div>
+                    <div class="text-muted small mt-2">單一個股技術、基本面、消息與籌碼觀察</div>
+                </div>
+                <div class="war-room-actions">
+                    <div class="input-group input-group-sm war-room-search-group">
+                        <input id="warRoomSearchInput" type="text" class="form-control" placeholder="輸入股票代碼，例如 NVDA / AAPL">
+                        <button id="warRoomAnalyzeBtn" class="btn btn-success" type="button">執行分析</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="row g-4 align-items-stretch">
+                <div class="col-xl-8">
+                    <div class="card war-room-panel h-100">
+                        <div class="card-body">
+                            <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-3">
+                                <div>
+                                    <div class="text-highlight fs-5 fw-bold" id="warRoomChartTitle">個股健檢戰情室</div>
+                                    <div class="text-muted small" id="warRoomChartSubtitle">請輸入股票代碼，或從推薦列表同步載入個股觀察畫面</div>
+                                </div>
+                                <div class="text-end small text-muted">
+                                    <div>觀察標的</div>
+                                    <div class="fs-6 fw-semibold text-light" id="warRoomSelectedSymbol">-</div>
+                                </div>
+                            </div>
+
+                            <div class="war-room-chart-toolbar">
+                                <div class="btn-group btn-group-sm war-room-period-group" role="group" aria-label="Chart period selector">
+                                    <button type="button" class="btn btn-outline-light active" data-war-room-period="d">D</button>
+                                    <button type="button" class="btn btn-outline-light" data-war-room-period="w">W</button>
+                                    <button type="button" class="btn btn-outline-light" data-war-room-period="m">M</button>
+                                </div>
+                                <div class="war-room-toggle-grid" id="warRoomChartToggles">
+                                    <label class="war-room-toggle-pill is-active"><input type="checkbox" data-war-room-toggle="volume" checked> <span>Volume</span></label>
+                                    <label class="war-room-toggle-pill is-active"><input type="checkbox" data-war-room-toggle="ma5" checked> <span>MA5</span></label>
+                                    <label class="war-room-toggle-pill is-active"><input type="checkbox" data-war-room-toggle="ma20" checked> <span>MA20</span></label>
+                                    <label class="war-room-toggle-pill"><input type="checkbox" data-war-room-toggle="ma60"> <span>MA60</span></label>
+                                    <label class="war-room-toggle-pill is-active"><input type="checkbox" data-war-room-toggle="priceLines" checked> <span>S/R</span></label>
+                                    <label class="war-room-toggle-pill is-active"><input type="checkbox" data-war-room-toggle="macd" checked> <span>MACD</span></label>
+                                    <label class="war-room-toggle-pill"><input type="checkbox" data-war-room-toggle="rsi"> <span>RSI</span></label>
+                                    <label class="war-room-toggle-pill"><input type="checkbox" data-war-room-toggle="kd"> <span>KD</span></label>
+                                    <label class="war-room-toggle-pill is-active"><input type="checkbox" data-war-room-toggle="flow" checked> <span>Flow</span></label>
+                                </div>
+                            </div>
+
+                            <div id="tv-chart-container" class="war-room-chart-placeholder">
+                                <div class="war-room-chart-copy">
+                                    <div class="fw-semibold">圖表初始化預留區</div>
+                                    <div class="small text-muted">此區預留給 TradingView Lightweight Charts / K 線 / 籌碼視覺化</div>
+                                </div>
+                            </div>
+
+                            <div class="row g-3 mt-1">
+                                <div class="col-lg-6">
+                                    <div class="war-room-subpanel h-100">
+                                        <div class="war-room-subtitle">價格地圖</div>
+                                        <div id="warRoomPriceMap" class="war-room-keyvalue-list"></div>
+                                    </div>
+                                </div>
+                                <div class="col-lg-6">
+                                    <div class="war-room-subpanel h-100">
+                                        <div class="war-room-subtitle">基本面快照</div>
+                                        <div id="warRoomFundamentals" class="war-room-keyvalue-list"></div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="col-xl-4">
+                    <div class="d-flex flex-column gap-4 h-100">
+                        <div class="card war-room-panel">
+                            <div class="card-body">
+                                <div class="d-flex justify-content-between align-items-start gap-3">
+                                    <div>
+                                        <div class="fw-semibold">系統量化指標</div>
+                                        <div class="text-muted small" id="warRoomMeta">等待分析</div>
+                                    </div>
+                                    <div class="text-end">
+                                        <div class="text-muted small">AI 信心</div>
+                                        <div class="war-room-confidence" id="warRoomConfidence">-</div>
+                                    </div>
+                                </div>
+                                <div id="warRoomOverviewBadges" class="mt-3 d-flex flex-wrap gap-2"></div>
+                                <div id="warRoomIndicatorList" class="war-room-indicator-list mt-3"></div>
+                            </div>
+                        </div>
+
+                        <div class="card war-room-panel flex-grow-1">
+                            <div class="card-body">
+                                <div class="text-highlight fw-semibold mb-2">深度健檢摘要</div>
+                                <div id="warRoomSummarySections" class="war-room-summary-sections"></div>
+                                <div class="war-room-divider"></div>
+                                <div class="war-room-subtitle">法人與籌碼</div>
+                                <div id="warRoomFlowSnapshot" class="mb-3"></div>
+                                <div id="warRoomFlowNote" class="text-muted small mb-2"></div>
+                                <div id="warRoomFlowList" class="war-room-bullet-list mb-3"></div>
+                                <div class="war-room-subtitle">最新消息</div>
+                                <div id="warRoomNewsList" class="war-room-news-list"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="row g-4 mt-1" id="warRoomPlaybooks"></div>
+        </div>
+    </div>
+</div>
 
 <!-- ======================== TAB: 推薦 ======================== -->
 <div class="tab-pane fade show active" id="tab-rec" role="tabpanel">
@@ -113,7 +236,9 @@
             <div class="card">
                 <div class="card-header card-header-primary">產業分佈</div>
                 <div class="card-body">
-                    <canvas id="sectorPieChart" height="260"></canvas>
+                    <div class="portfolio-sector-chart">
+                        <canvas id="sectorPieChart" height="260"></canvas>
+                    </div>
                 </div>
             </div>
         </div>
@@ -122,7 +247,41 @@
 
 <!-- ======================== TAB: 回測 ======================== -->
 <div class="tab-pane fade" id="tab-backtest" role="tabpanel">
-    <h5 class="mb-3">📊 回測績效</h5>
+    <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+        <h5 class="mb-0">📊 回測績效</h5>
+        <div class="d-flex flex-wrap align-items-center gap-2">
+            <button id="runBacktestBtn" class="btn btn-sm btn-outline-success" type="button" onclick="runOneClickBacktest()">⚡ 一鍵回測</button>
+            <div id="backtestRunStatus" class="text-muted small">尚未執行一鍵回測</div>
+        </div>
+    </div>
+    <div class="card border-0 bg-light mb-3">
+        <div class="card-body py-3">
+            <div class="row g-2 align-items-end">
+                <div class="col-lg-3 col-md-6">
+                    <label for="backtestPoolPreset" class="form-label small text-muted mb-1">股票池</label>
+                    <select id="backtestPoolPreset" class="form-select form-select-sm" onchange="applyBacktestPreset(this.value)">
+                        <option value="ai_leaders">AI 核心 8 檔</option>
+                        <option value="balanced_12">跨產業 12 檔</option>
+                        <option value="etf_rotation">ETF 輪動 6 檔</option>
+                        <option value="custom">自訂</option>
+                    </select>
+                </div>
+                <div class="col-lg-5 col-md-6">
+                    <label for="backtestSymbolsInput" class="form-label small text-muted mb-1">股票代碼</label>
+                    <input id="backtestSymbolsInput" class="form-control form-control-sm" type="text" placeholder="例如 AAPL,MSFT,NVDA" oninput="handleBacktestSymbolsInput()">
+                    <div class="form-text">逗號分隔；選預設後可直接再手動微調。</div>
+                </div>
+                <div class="col-lg-2 col-md-4 col-6">
+                    <label for="backtestMonthsInput" class="form-label small text-muted mb-1">月數</label>
+                    <input id="backtestMonthsInput" class="form-control form-control-sm" type="number" min="1" max="36" value="6">
+                </div>
+                <div class="col-lg-2 col-md-4 col-6">
+                    <label for="backtestTopNInput" class="form-label small text-muted mb-1">Top N</label>
+                    <input id="backtestTopNInput" class="form-control form-control-sm" type="number" min="1" max="20" value="5">
+                </div>
+            </div>
+        </div>
+    </div>
     <div class="row">
         <!-- 左：回測列表 -->
         <div class="col-md-3">
@@ -274,13 +433,46 @@
 let equityChart = null;
 let sectorPieChart = null;
 let strategies = [];
+let backtestStatusPoller = null;
+const backtestPoolPresets = Object.freeze({
+    ai_leaders: ['AAPL', 'MSFT', 'NVDA', 'META', 'GOOGL', 'AMZN', 'AVGO', 'AMD'],
+    balanced_12: ['AAPL', 'MSFT', 'NVDA', 'META', 'GOOGL', 'AMZN', 'JPM', 'LLY', 'XOM', 'PG', 'UNH', 'COST'],
+    etf_rotation: ['SPY', 'QQQ', 'IWM', 'XLE', 'XLV', 'XLF'],
+    custom: [],
+});
 const backendWarnings = new Map();
+const warRoomDefaultToggles = Object.freeze({
+    volume: true,
+    ma5: true,
+    ma20: true,
+    ma60: false,
+    priceLines: true,
+    macd: true,
+    rsi: false,
+    kd: false,
+    flow: true,
+});
+const warRoomState = {
+    symbol: null,
+    initialized: false,
+    chartController: null,
+    resizeObserver: null,
+    chartRequestId: 0,
+    period: 'd',
+    chartCache: {},
+    lastWarRoomData: null,
+    toggles: { ...warRoomDefaultToggles },
+};
 
 document.addEventListener('DOMContentLoaded', () => {
+    initBacktestForm();
+    bindWarRoomEvents();
+    renderWarRoomEmptyState('請輸入股票代碼，或從推薦列表點選一檔股票同步觀察');
     loadRecDates();
     loadRecommendations();
     loadPortfolio();
     loadBacktestList();
+    loadBacktestStatus();
     loadMacro();
     loadSectors();
     loadMLStatus();
@@ -301,6 +493,7 @@ const pass = v => v === null || v === undefined
 const fmt = (v, d=2) => v != null ? Number(v).toFixed(d) : '-';
 const pct = (v, d=1) => v != null ? (Number(v)*100).toFixed(d)+'%' : '-';
 const dollar = v => v != null ? '$'+Number(v).toFixed(2) : '-';
+const esc = v => String(v ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
 
 function heatColor(val) {
     if (val == null) return '';
@@ -337,6 +530,612 @@ function syncBackendStatus(key, payload, fallbackMessage) {
     renderBackendStatus();
 }
 
+function getWarRoomCacheKey(symbol, period = warRoomState.period) {
+    return `${symbol}:${period}`;
+}
+
+function updateWarRoomChartControls() {
+    document.querySelectorAll('[data-war-room-period]').forEach(button => {
+        const isActive = button.dataset.warRoomPeriod === warRoomState.period;
+        button.classList.toggle('active', isActive);
+        button.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+    });
+
+    document.querySelectorAll('[data-war-room-toggle]').forEach(input => {
+        const toggleKey = input.dataset.warRoomToggle;
+        const isActive = Boolean(warRoomState.toggles[toggleKey]);
+        input.checked = isActive;
+        input.closest('.war-room-toggle-pill')?.classList.toggle('is-active', isActive);
+    });
+}
+
+function destroyWarRoomChart() {
+    if (warRoomState.resizeObserver) {
+        warRoomState.resizeObserver.disconnect();
+        warRoomState.resizeObserver = null;
+    }
+    if (warRoomState.chartController?.charts?.length) {
+        warRoomState.chartController.charts.forEach(chart => chart.remove());
+    }
+    warRoomState.chartController = null;
+}
+
+function renderWarRoomChartFallback(title, message) {
+    destroyWarRoomChart();
+    const container = document.getElementById('tv-chart-container');
+    container.innerHTML = `
+        <div class="war-room-chart-copy">
+            <div class="fw-semibold">${esc(title)}</div>
+            <div class="small text-muted">${esc(message)}</div>
+        </div>`;
+}
+
+function addWarRoomPriceLines(series, priceLines) {
+    if (!window.LightweightCharts || !series || !Array.isArray(priceLines)) return;
+    const lineStyle = window.LightweightCharts.LineStyle?.Dashed ?? 2;
+    priceLines.filter(line => line.price != null).forEach(line => {
+        series.createPriceLine({
+            price: line.price,
+            color: line.color,
+            lineWidth: 1,
+            lineStyle,
+            axisLabelVisible: true,
+            title: line.title,
+        });
+    });
+}
+
+function createWarRoomPaneElement({ title, caption, height, isPrice = false, emptyMessage = null }) {
+    const pane = document.createElement('div');
+    pane.className = `war-room-chart-pane${isPrice ? ' is-price' : ''}`;
+    pane.style.setProperty('--war-room-pane-height', `${height}px`);
+    pane.innerHTML = `
+        <div class="war-room-chart-pane-head">
+            <div class="war-room-chart-pane-title">${esc(title)}</div>
+            <div class="war-room-chart-pane-caption">${esc(caption || '')}</div>
+        </div>
+        ${emptyMessage
+            ? `<div class="war-room-chart-pane-fallback">${esc(emptyMessage)}</div>`
+            : '<div class="war-room-chart-pane-surface"></div>'}`;
+
+    return {
+        pane,
+        surface: pane.querySelector('.war-room-chart-pane-surface'),
+    };
+}
+
+function createWarRoomChartInstance(surface) {
+    return window.LightweightCharts.createChart(surface, {
+        width: Math.max(surface.clientWidth || surface.parentElement?.clientWidth || 320, 320),
+        height: Math.max(surface.clientHeight || 160, 160),
+        layout: {
+            background: { type: 'solid', color: '#161b22' },
+            textColor: '#c9d1d9',
+            fontFamily: 'Segoe UI, Noto Sans TC, sans-serif',
+        },
+        grid: {
+            vertLines: { color: 'rgba(48, 54, 61, 0.35)' },
+            horzLines: { color: 'rgba(48, 54, 61, 0.35)' },
+        },
+        rightPriceScale: {
+            borderColor: '#30363d',
+        },
+        timeScale: {
+            borderColor: '#30363d',
+            timeVisible: true,
+            secondsVisible: false,
+        },
+        crosshair: {
+            vertLine: { color: 'rgba(88, 166, 255, 0.35)' },
+            horzLine: { color: 'rgba(88, 166, 255, 0.25)' },
+        },
+    });
+}
+
+function syncWarRoomChartRanges(charts) {
+    let syncing = false;
+    charts.forEach(chart => {
+        chart.timeScale().subscribeVisibleLogicalRangeChange(range => {
+            if (syncing || !range) return;
+            syncing = true;
+            charts.forEach(otherChart => {
+                if (otherChart !== chart) {
+                    otherChart.timeScale().setVisibleLogicalRange(range);
+                }
+            });
+            syncing = false;
+        });
+    });
+}
+
+function buildWarRoomPaneDefinitions(bundle) {
+    const definitions = [];
+
+    if (warRoomState.toggles.volume) {
+        definitions.push({
+            title: '成交量',
+            caption: '獨立量能區塊',
+            height: 150,
+            emptyMessage: bundle?.candles?.length ? null : '目前無可用成交量資料',
+            render(chart) {
+                const bars = chart.addHistogramSeries({
+                    priceFormat: { type: 'volume' },
+                    priceScaleId: '',
+                });
+                bars.setData((bundle.candles || []).map(item => ({
+                    time: item.time,
+                    value: item.volume,
+                    color: item.close >= item.open ? 'rgba(46, 160, 67, 0.6)' : 'rgba(248, 81, 73, 0.6)',
+                })));
+            },
+        });
+    }
+
+    if (warRoomState.toggles.macd) {
+        definitions.push({
+            title: 'MACD',
+            caption: '趨勢動能快慢線',
+            height: 160,
+            emptyMessage: bundle.indicators?.macd?.empty_message,
+            render(chart) {
+                const macd = bundle.indicators?.macd || {};
+                const histogram = chart.addHistogramSeries({ priceScaleId: '', priceFormat: { type: 'price', precision: 2, minMove: 0.01 } });
+                const macdSeries = chart.addLineSeries({ color: '#7ee787', lineWidth: 2, priceLineVisible: false });
+                const signalSeries = chart.addLineSeries({ color: '#f2cc60', lineWidth: 2, priceLineVisible: false });
+                histogram.setData(macd.histogram || []);
+                macdSeries.setData(macd.macd || []);
+                signalSeries.setData(macd.signal || []);
+            },
+        });
+    }
+
+    if (warRoomState.toggles.rsi) {
+        definitions.push({
+            title: 'RSI',
+            caption: '14 期相對強弱',
+            height: 150,
+            emptyMessage: bundle.indicators?.rsi?.empty_message,
+            render(chart) {
+                const rsi = bundle.indicators?.rsi || {};
+                const line = chart.addLineSeries({ color: '#7ee0ff', lineWidth: 2, priceLineVisible: false });
+                line.setData(rsi.series || []);
+                addWarRoomPriceLines(line, (rsi.bands || []).map((value, index) => ({
+                    price: value,
+                    title: index === 0 ? '30' : '70',
+                    color: 'rgba(242, 204, 96, 0.8)',
+                })));
+            },
+        });
+    }
+
+    if (warRoomState.toggles.kd) {
+        definitions.push({
+            title: 'KD',
+            caption: '9 期隨機震盪',
+            height: 150,
+            emptyMessage: bundle.indicators?.kd?.empty_message,
+            render(chart) {
+                const kd = bundle.indicators?.kd || {};
+                chart.addLineSeries({ color: '#7ee0ff', lineWidth: 2, priceLineVisible: false }).setData(kd.k || []);
+                const dSeries = chart.addLineSeries({ color: '#f2cc60', lineWidth: 2, priceLineVisible: false });
+                dSeries.setData(kd.d || []);
+                const jSeries = chart.addLineSeries({ color: '#d2a8ff', lineWidth: 2, priceLineVisible: false });
+                jSeries.setData(kd.j || []);
+                addWarRoomPriceLines(dSeries, (kd.bands || []).map((value, index) => ({
+                    price: value,
+                    title: index === 0 ? '20' : '80',
+                    color: 'rgba(242, 204, 96, 0.8)',
+                })));
+            },
+        });
+    }
+
+    if (warRoomState.toggles.flow) {
+        definitions.push({
+            title: bundle.flow?.label || 'Flow',
+            caption: bundle.flow?.source === 'proxy' ? '代理序列' : '直接資料',
+            height: 150,
+            emptyMessage: bundle.flow?.empty_message,
+            render(chart) {
+                const flow = bundle.flow || {};
+                const bars = chart.addHistogramSeries({ priceScaleId: '', priceFormat: { type: 'price', precision: 0, minMove: 1 } });
+                const trend = chart.addLineSeries({ color: '#d2a8ff', lineWidth: 2, priceLineVisible: false });
+                bars.setData(flow.series || []);
+                trend.setData(flow.trend || []);
+            },
+        });
+    }
+
+    return definitions;
+}
+
+function renderWarRoomChartBundle(bundle) {
+    if (!window.LightweightCharts?.createChart) {
+        renderWarRoomChartFallback(`${bundle.symbol} 圖表模組未載入`, 'Lightweight Charts CDN 尚未就緒');
+        return;
+    }
+
+    if (!bundle?.candles?.length) {
+        renderWarRoomChartFallback(`${bundle.symbol} 暫無歷史資料`, bundle?.empty_message || '目前無可用的 OHLCV 資料');
+        return;
+    }
+
+    destroyWarRoomChart();
+    const container = document.getElementById('tv-chart-container');
+    const lowerPanes = buildWarRoomPaneDefinitions(bundle);
+    container.innerHTML = '<div class="war-room-chart-stack"></div>';
+    const stack = container.firstElementChild;
+
+    const charts = [];
+    const surfaces = [];
+    const pricePane = createWarRoomPaneElement({
+        title: `${bundle.period_label}主圖`,
+        caption: `${bundle.meta?.candle_count || 0} 根 K 線`,
+        height: lowerPanes.length >= 2 ? 340 : 380,
+        isPrice: true,
+    });
+    stack.appendChild(pricePane.pane);
+
+    const priceChart = createWarRoomChartInstance(pricePane.surface);
+    const candleSeries = priceChart.addCandlestickSeries({
+        upColor: '#2ea043',
+        borderUpColor: '#2ea043',
+        wickUpColor: '#2ea043',
+        downColor: '#f85149',
+        borderDownColor: '#f85149',
+        wickDownColor: '#f85149',
+        priceLineVisible: false,
+    });
+
+    candleSeries.setData((bundle.candles || []).map(item => ({
+        time: item.time,
+        open: item.open,
+        high: item.high,
+        low: item.low,
+        close: item.close,
+    })));
+
+    if (warRoomState.toggles.ma5 && bundle.overlays?.moving_averages?.ma5?.length) {
+        priceChart.addLineSeries({ color: '#7ee0ff', lineWidth: 2, priceLineVisible: false }).setData(bundle.overlays.moving_averages.ma5);
+    }
+    if (warRoomState.toggles.ma20 && bundle.overlays?.moving_averages?.ma20?.length) {
+        priceChart.addLineSeries({ color: '#f2cc60', lineWidth: 2, priceLineVisible: false }).setData(bundle.overlays.moving_averages.ma20);
+    }
+    if (warRoomState.toggles.ma60 && bundle.overlays?.moving_averages?.ma60?.length) {
+        priceChart.addLineSeries({ color: '#d2a8ff', lineWidth: 2, priceLineVisible: false }).setData(bundle.overlays.moving_averages.ma60);
+    }
+    if (warRoomState.toggles.priceLines) {
+        addWarRoomPriceLines(candleSeries, bundle.overlays?.price_lines || []);
+    }
+
+    charts.push(priceChart);
+    surfaces.push(pricePane.surface);
+
+    lowerPanes.forEach(definition => {
+        const pane = createWarRoomPaneElement(definition);
+        stack.appendChild(pane.pane);
+        if (!pane.surface) {
+            return;
+        }
+
+        const chart = createWarRoomChartInstance(pane.surface);
+        definition.render(chart);
+        charts.push(chart);
+        surfaces.push(pane.surface);
+    });
+
+    syncWarRoomChartRanges(charts);
+    priceChart.timeScale().fitContent();
+    const visibleRange = priceChart.timeScale().getVisibleLogicalRange();
+    if (visibleRange) {
+        charts.slice(1).forEach(chart => chart.timeScale().setVisibleLogicalRange(visibleRange));
+    }
+
+    warRoomState.chartController = { charts, surfaces };
+    document.getElementById('warRoomChartSubtitle').textContent = `${bundle.period_label} ・ ${bundle.meta?.candle_count || 0} 根 K 線 ・ Flow ${bundle.flow?.source === 'proxy' ? '代理序列' : '直接資料'}`;
+
+    if (window.ResizeObserver) {
+        warRoomState.resizeObserver = new ResizeObserver(() => {
+            if (!warRoomState.chartController) return;
+            warRoomState.chartController.charts.forEach((chart, index) => {
+                const surface = warRoomState.chartController.surfaces[index];
+                chart.resize(Math.max(surface.clientWidth, 320), Math.max(surface.clientHeight, 140));
+            });
+        });
+        warRoomState.resizeObserver.observe(container);
+    }
+}
+
+async function loadWarRoomChart(data) {
+    const symbol = data.symbol;
+    const period = warRoomState.period;
+    const requestId = ++warRoomState.chartRequestId;
+    const cacheKey = getWarRoomCacheKey(symbol, period);
+
+    if (warRoomState.chartCache[cacheKey]) {
+        renderWarRoomChartBundle(warRoomState.chartCache[cacheKey]);
+        return;
+    }
+
+    renderWarRoomChartFallback(`${symbol} 圖表載入中`, `正在讀取 ${period.toUpperCase()} 週期 K 線、均線與下方指標...`);
+
+    try {
+        const resp = await fetch(`/api/stock/${encodeURIComponent(symbol)}/history?period=${encodeURIComponent(period)}`);
+        const bundle = await resp.json();
+
+        if (requestId !== warRoomState.chartRequestId || warRoomState.symbol !== symbol) {
+            return;
+        }
+
+        if (!resp.ok || bundle?.error) {
+            renderWarRoomChartFallback(`${symbol} 圖表載入失敗`, bundle?.error || '歷史資料載入失敗');
+            return;
+        }
+
+        warRoomState.chartCache[cacheKey] = bundle;
+        renderWarRoomChartBundle(bundle);
+    } catch (e) {
+        if (requestId !== warRoomState.chartRequestId || warRoomState.symbol !== symbol) {
+            return;
+        }
+        renderWarRoomChartFallback(`${symbol} 圖表載入失敗`, e.message);
+    }
+}
+
+function bindWarRoomEvents() {
+    const input = document.getElementById('warRoomSearchInput');
+    const button = document.getElementById('warRoomAnalyzeBtn');
+    if (!input || !button) return;
+
+    input.addEventListener('keydown', event => {
+        if (event.key === 'Enter') {
+            event.preventDefault();
+            runWarRoomAnalysis();
+        }
+    });
+    button.addEventListener('click', () => runWarRoomAnalysis());
+
+    document.querySelectorAll('[data-war-room-period]').forEach(button => {
+        button.addEventListener('click', () => {
+            const nextPeriod = button.dataset.warRoomPeriod;
+            if (nextPeriod === warRoomState.period) return;
+            warRoomState.period = nextPeriod;
+            updateWarRoomChartControls();
+            if (warRoomState.lastWarRoomData?.symbol) {
+                loadWarRoomChart(warRoomState.lastWarRoomData);
+            }
+        });
+    });
+
+    document.querySelectorAll('[data-war-room-toggle]').forEach(inputEl => {
+        inputEl.addEventListener('change', event => {
+            const toggleKey = event.target.dataset.warRoomToggle;
+            warRoomState.toggles[toggleKey] = event.target.checked;
+            updateWarRoomChartControls();
+            if (!warRoomState.lastWarRoomData?.symbol) return;
+            const cacheKey = getWarRoomCacheKey(warRoomState.lastWarRoomData.symbol, warRoomState.period);
+            const bundle = warRoomState.chartCache[cacheKey];
+            if (bundle) {
+                renderWarRoomChartBundle(bundle);
+            }
+        });
+    });
+
+    document.querySelector('[href="#tab-war-room"]')?.addEventListener('shown.bs.tab', () => {
+        if (!warRoomState.lastWarRoomData?.symbol) return;
+        const cacheKey = getWarRoomCacheKey(warRoomState.lastWarRoomData.symbol, warRoomState.period);
+        const bundle = warRoomState.chartCache[cacheKey];
+        if (bundle) {
+            renderWarRoomChartBundle(bundle);
+        }
+    });
+
+    updateWarRoomChartControls();
+}
+
+function runWarRoomAnalysis() {
+    const input = document.getElementById('warRoomSearchInput');
+    const raw = input.value.trim();
+    if (!raw) {
+        renderWarRoomError('請先輸入股票代碼');
+        return;
+    }
+    fetchStockWarRoom(raw.toUpperCase(), { switchTab: true });
+}
+
+function syncWarRoomFromSymbol(symbol) {
+    const input = document.getElementById('warRoomSearchInput');
+    if (input) input.value = symbol;
+    fetchStockWarRoom(symbol, { switchTab: false });
+}
+
+function renderWarRoomEmptyState(message) {
+    warRoomState.lastWarRoomData = null;
+    document.getElementById('warRoomSelectedSymbol').textContent = '-';
+    document.getElementById('warRoomChartTitle').textContent = '個股健檢戰情室';
+    document.getElementById('warRoomChartSubtitle').textContent = message;
+    document.getElementById('warRoomMeta').textContent = '等待分析';
+    document.getElementById('warRoomConfidence').textContent = '-';
+    document.getElementById('warRoomOverviewBadges').innerHTML = '<span class="badge text-bg-secondary">尚未載入</span>';
+    document.getElementById('warRoomIndicatorList').innerHTML = '<div class="text-muted small">輸入股票代碼後，這裡會顯示量化訊號、總經與籌碼觀察。</div>';
+    renderWarRoomChartFallback('圖表初始化預留區', message);
+    document.getElementById('warRoomPriceMap').innerHTML = '<div class="text-muted small">等待價格資料</div>';
+    document.getElementById('warRoomFundamentals').innerHTML = '<div class="text-muted small">等待基本面資料</div>';
+    document.getElementById('warRoomSummarySections').innerHTML = '<div class="text-muted small">尚未產生個股診斷摘要</div>';
+    document.getElementById('warRoomFlowSnapshot').innerHTML = '<div class="text-muted small">尚未載入法人大戶摘要</div>';
+    document.getElementById('warRoomFlowNote').textContent = '';
+    document.getElementById('warRoomFlowList').innerHTML = '<div class="text-muted small">尚未載入法人與籌碼資料</div>';
+    document.getElementById('warRoomNewsList').innerHTML = '<div class="text-muted small">尚未載入最新消息</div>';
+    document.getElementById('warRoomPlaybooks').innerHTML = ['', '', ''].map(() => `
+        <div class="col-lg-4 col-md-6">
+            <div class="card war-room-playbook-card h-100">
+                <div class="card-body">
+                    <div class="war-room-subtitle">待分析劇本</div>
+                    <div class="text-muted small">完成分析後，這裡會顯示進場、停損與目標價位。</div>
+                </div>
+            </div>
+        </div>`).join('');
+    updateWarRoomChartControls();
+}
+
+function renderWarRoomLoading(symbol) {
+    renderWarRoomEmptyState(`正在分析 ${symbol} ...`);
+    document.getElementById('warRoomSelectedSymbol').textContent = symbol;
+    document.getElementById('warRoomChartTitle').textContent = `${symbol} 個股健檢中`;
+    document.getElementById('warRoomChartSubtitle').textContent = `圖表與指標資料載入中 (${warRoomState.period.toUpperCase()})`;
+    document.getElementById('warRoomMeta').textContent = '資料載入中';
+    document.getElementById('warRoomConfidence').textContent = '...';
+}
+
+function renderWarRoomError(message) {
+    renderWarRoomEmptyState(message || '載入失敗');
+    document.getElementById('warRoomOverviewBadges').innerHTML = '<span class="badge text-bg-danger">分析失敗</span>';
+}
+
+function renderWarRoomKeyValues(items) {
+    return items.map(item => `
+        <div class="war-room-keyvalue-row">
+            <span class="text-muted">${esc(item.label)}</span>
+            <strong>${esc(item.value)}</strong>
+        </div>`).join('');
+}
+
+function renderWarRoom(data) {
+    warRoomState.symbol = data.symbol;
+    warRoomState.initialized = true;
+    warRoomState.lastWarRoomData = data;
+
+    document.getElementById('warRoomSelectedSymbol').textContent = data.symbol || '-';
+    document.getElementById('warRoomChartTitle').textContent = `${data.symbol || '-'} 個股健檢戰情室`;
+    document.getElementById('warRoomChartSubtitle').textContent = '正在建立多週期圖表與指標面板';
+    document.getElementById('warRoomMeta').textContent = `掃描日 ${data.overview?.scan_date || '-'} ・ Regime ${data.overview?.macro_regime || '-'}`;
+    document.getElementById('warRoomConfidence').textContent = data.overview?.confidence != null ? `${Math.round(data.overview.confidence * 100)}%` : '-';
+
+    const badgeTone = data.overview?.signal === 'BUY' ? 'text-bg-success' : 'text-bg-danger';
+    document.getElementById('warRoomOverviewBadges').innerHTML = `
+        <span class="badge ${badgeTone}">${esc(data.overview?.signal || 'N/A')}</span>
+        <span class="badge text-bg-primary">總分 ${fmt(data.overview?.total_score)}</span>
+        <span class="badge text-bg-dark">${esc(data.overview?.sector || '未知產業')}</span>`;
+
+    const indicatorItems = [
+        { tone: 'positive', text: data.diagnostics?.positive?.[0] || '目前無明確偏多訊號' },
+        { tone: 'neutral', text: data.flow_context?.items?.[0] || '法人籌碼資料不足' },
+        { tone: data.overview?.signal === 'BUY' ? 'positive' : 'negative', text: `交易訊號：${data.overview?.signal || '-'} / 總經：${data.overview?.macro_regime || '-'}` },
+    ];
+    document.getElementById('warRoomIndicatorList').innerHTML = indicatorItems.map(item => `
+        <div class="war-room-indicator-item">
+            <span class="war-room-indicator-dot ${item.tone}"></span>
+            <span>${esc(item.text)}</span>
+        </div>`).join('');
+
+    updateWarRoomChartControls();
+    loadWarRoomChart(data);
+
+    document.getElementById('warRoomPriceMap').innerHTML = renderWarRoomKeyValues([
+        { label: '現價', value: dollar(data.price_map?.current) },
+        { label: '支撐 1', value: dollar(data.price_map?.support_1) },
+        { label: '支撐 2', value: dollar(data.price_map?.support_2) },
+        { label: '壓力 1', value: dollar(data.price_map?.resistance_1) },
+        { label: '壓力 2', value: dollar(data.price_map?.resistance_2) },
+    ]);
+
+    document.getElementById('warRoomFundamentals').innerHTML = renderWarRoomKeyValues([
+        { label: 'PE', value: fmt(data.fundamentals?.pe_ratio) },
+        { label: 'PEG', value: fmt(data.fundamentals?.peg_ratio) },
+        { label: 'ROE', value: pct(data.fundamentals?.roe) },
+        { label: '營收成長', value: pct(data.fundamentals?.revenue_growth) },
+        { label: '盈餘成長', value: pct(data.fundamentals?.earnings_growth) },
+        { label: '機構持股', value: pct(data.fundamentals?.institutional_ownership) },
+    ]);
+
+    document.getElementById('warRoomSummarySections').innerHTML = (data.summary_sections || []).map(section => `
+        <div class="war-room-summary-block ${section.tone || 'neutral'}">
+            <div class="war-room-summary-title">${esc(section.title)}</div>
+            ${(section.lines || []).map(line => `<div class="small">${esc(line)}</div>`).join('')}
+        </div>`).join('');
+
+    const flowSnapshotRows = [
+        { label: '法人大戶動向', value: data.flow_context?.trend_label || '資料不足' },
+    ];
+    if (data.today_flow?.trade_date) {
+        flowSnapshotRows.push({ label: data.today_flow?.date_label || '資料日期', value: data.today_flow.trade_date });
+    }
+    (data.today_flow?.rows || []).forEach(row => {
+        flowSnapshotRows.push({ label: row.label, value: row.value });
+    });
+    if (!(data.today_flow?.rows || []).length) {
+        flowSnapshotRows.push({ label: data.today_flow?.headline_label || '法人 / 內部人快照', value: data.today_flow?.summary || '資料不足' });
+    }
+    document.getElementById('warRoomFlowSnapshot').innerHTML = renderWarRoomKeyValues(flowSnapshotRows);
+    document.getElementById('warRoomFlowNote').textContent = data.today_flow?.note || '';
+
+    const flowSkipItems = new Set([
+        data.flow_context?.trend_label,
+        data.today_flow?.summary,
+        data.today_flow?.note,
+    ].filter(Boolean));
+    const flowItems = (data.flow_context?.items || []).filter(item => !flowSkipItems.has(item));
+    document.getElementById('warRoomFlowList').innerHTML = flowItems.length
+        ? flowItems.map(item => `
+            <div class="war-room-bullet-item"><span class="dot"></span><span>${esc(item)}</span></div>`).join('')
+        : '<div class="text-muted small">目前沒有額外的法人與籌碼補充訊號</div>';
+
+    const newsItems = data.news?.items || [];
+    document.getElementById('warRoomNewsList').innerHTML = newsItems.length
+        ? newsItems.map(item => `
+            <div class="war-room-news-item">
+                <div class="fw-semibold small">${esc(item.title)}</div>
+                <div class="text-muted small">${esc(item.date || '')} ${item.provider ? '・ ' + esc(item.provider) : ''}</div>
+                <div class="small text-muted">${esc(item.summary || '無摘要')}</div>
+            </div>`).join('')
+        : `<div class="text-muted small">${esc(data.news?.empty_message || '目前無最新消息')}</div>`;
+
+    document.getElementById('warRoomPlaybooks').innerHTML = (data.playbooks || []).map(playbook => `
+        <div class="col-xl-4 col-md-6">
+            <div class="card war-room-playbook-card war-room-tone-${playbook.tone || 'neutral'} h-100">
+                <div class="war-room-playbook-topline"></div>
+                <div class="card-body">
+                    <div class="fw-bold fs-6 mb-3">${esc(playbook.title)}</div>
+                    <div class="war-room-keyvalue-row"><span class="text-muted">建議進場價</span><strong>${esc(playbook.entry_zone || '-')}</strong></div>
+                    <div class="war-room-keyvalue-row"><span class="text-muted">嚴格停損價</span><strong>${esc(playbook.stop_loss || '-')}</strong></div>
+                    <div class="war-room-keyvalue-row"><span class="text-muted">預期目標價</span><strong>${esc((playbook.targets || []).filter(Boolean).join(' / ') || '-')}</strong></div>
+                    <div class="text-muted small mt-3">${esc(playbook.summary || '')}</div>
+                </div>
+            </div>
+        </div>`).join('');
+}
+
+async function fetchStockWarRoom(symbol, options = {}) {
+    const normalized = (symbol || '').trim().toUpperCase();
+    if (!normalized) {
+        renderWarRoomError('請先輸入股票代碼');
+        return;
+    }
+
+    warRoomState.symbol = normalized;
+    const input = document.getElementById('warRoomSearchInput');
+    if (input) input.value = normalized;
+    renderWarRoomLoading(normalized);
+
+    try {
+        const resp = await fetch(`/api/stock/${encodeURIComponent(normalized)}/war-room`);
+        const data = await resp.json();
+        if (!resp.ok || data.error) {
+            renderWarRoomError(data.error || `${normalized} 查無資料`);
+            return;
+        }
+
+        renderWarRoom(data);
+
+        if (options.switchTab) {
+            const tabTrigger = document.querySelector('[href="#tab-war-room"]');
+            if (tabTrigger) bootstrap.Tab.getOrCreateInstance(tabTrigger).show();
+        }
+    } catch (e) {
+        renderWarRoomError(`戰情室載入失敗: ${e.message}`);
+    }
+}
+
 // ============================================
 // Recommendations
 // ============================================
@@ -366,6 +1165,10 @@ async function loadRecommendations() {
         const tbody = document.getElementById('recBody');
         const recs = data.recommendations || data || [];
 
+        if (!warRoomState.initialized && recs.length) {
+            fetchStockWarRoom(recs[0].symbol);
+        }
+
         if (!recs.length) {
             tbody.innerHTML = '<tr><td colspan="19" class="text-center text-muted py-4">該日無推薦</td></tr>';
             return;
@@ -374,7 +1177,7 @@ async function loadRecommendations() {
         tbody.innerHTML = recs.map(r => {
             const sigClass = r.signal === 'BUY' ? 'positive' : 'negative';
             const ml = r.ml_confidence != null ? pct(r.ml_confidence, 0) : '-';
-            return `<tr class="clickable-row" onclick="openStockModal('${r.symbol}')">
+            return `<tr class="clickable-row" onclick="openStockModal('${r.symbol}'); syncWarRoomFromSymbol('${r.symbol}')">
                 <td><strong>${r.rank}</strong></td>
                 <td><strong>${r.symbol}</strong></td>
                 <td class="${sigClass}">${r.signal || '-'}</td>
@@ -511,6 +1314,7 @@ async function loadPortfolio() {
 
         if (!holdings.length) {
             tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-4">無持倉資料</td></tr>';
+            buildSectorPie([]);
             return;
         }
 
@@ -556,18 +1360,147 @@ function buildSectorPie(holdings) {
     const values = Object.values(counts);
     const colors = ['#667eea','#00c853','#f5576c','#ffd200','#4facfe','#764ba2','#ff9100','#11998e','#999'];
 
-    if (sectorPieChart) sectorPieChart.destroy();
-    const ctx = document.getElementById('sectorPieChart').getContext('2d');
+    const canvas = document.getElementById('sectorPieChart');
+    if (!canvas) return;
+
+    const chartData = {
+        labels,
+        datasets: [{ data: values, backgroundColor: colors.slice(0, labels.length) }],
+    };
+
+    if (sectorPieChart) {
+        sectorPieChart.data.labels = chartData.labels;
+        sectorPieChart.data.datasets[0].data = chartData.datasets[0].data;
+        sectorPieChart.data.datasets[0].backgroundColor = chartData.datasets[0].backgroundColor;
+        sectorPieChart.update('none');
+        return;
+    }
+
+    const ctx = canvas.getContext('2d');
     sectorPieChart = new Chart(ctx, {
         type: 'doughnut',
-        data: { labels, datasets: [{ data: values, backgroundColor: colors.slice(0, labels.length) }] },
-        options: { responsive: true, plugins: { legend: { position: 'bottom', labels: { font: { size: 11 } } } } }
+        data: chartData,
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            animation: false,
+            plugins: { legend: { position: 'bottom', labels: { font: { size: 11 } } } }
+        }
     });
 }
 
 // ============================================
 // Backtest
 // ============================================
+function initBacktestForm() {
+    const presetEl = document.getElementById('backtestPoolPreset');
+    if (!presetEl) return;
+    applyBacktestPreset(presetEl.value || 'ai_leaders');
+}
+
+function applyBacktestPreset(presetKey) {
+    const symbolsInput = document.getElementById('backtestSymbolsInput');
+    if (!symbolsInput) return;
+    const symbols = backtestPoolPresets[presetKey] || [];
+    if (!symbols.length) return;
+    symbolsInput.value = symbols.join(',');
+}
+
+function handleBacktestSymbolsInput() {
+    const presetEl = document.getElementById('backtestPoolPreset');
+    if (!presetEl) return;
+    presetEl.value = 'custom';
+}
+
+function getBacktestFormPayload() {
+    const symbolsInput = document.getElementById('backtestSymbolsInput');
+    const monthsInput = document.getElementById('backtestMonthsInput');
+    const topNInput = document.getElementById('backtestTopNInput');
+    const presetEl = document.getElementById('backtestPoolPreset');
+
+    const symbols = String(symbolsInput?.value || '')
+        .split(',')
+        .map(value => value.trim().toUpperCase())
+        .filter(Boolean);
+
+    return {
+        pool_name: presetEl?.value || 'custom',
+        symbols,
+        months: Number(monthsInput?.value || 6),
+        top_n: Number(topNInput?.value || 5),
+    };
+}
+
+function renderBacktestStatus(state = {}) {
+    const statusEl = document.getElementById('backtestRunStatus');
+    const buttonEl = document.getElementById('runBacktestBtn');
+    if (!statusEl || !buttonEl) return;
+
+    const status = state.status || 'idle';
+    const suffix = state.last_strategy_name ? ` ・ 最新: ${state.last_strategy_name}` : '';
+    let text = state.message || '尚未執行一鍵回測';
+
+    if (status === 'completed') {
+        text = `${text}${suffix}`;
+    }
+    if (status === 'failed' && state.output_tail?.length) {
+        text = `${text} ・ ${state.output_tail[state.output_tail.length - 1]}`;
+    }
+
+    statusEl.textContent = text;
+    statusEl.className = `small ${status === 'failed' ? 'negative' : status === 'completed' ? 'positive' : 'text-muted'}`;
+    buttonEl.disabled = status === 'running' || status === 'queued';
+}
+
+function scheduleBacktestStatusPolling(status) {
+    if (backtestStatusPoller) {
+        clearTimeout(backtestStatusPoller);
+        backtestStatusPoller = null;
+    }
+
+    if (status === 'running' || status === 'queued') {
+        backtestStatusPoller = setTimeout(() => loadBacktestStatus(), 5000);
+    }
+}
+
+async function loadBacktestStatus() {
+    try {
+        const resp = await fetch('/api/backtest/status');
+        const state = await resp.json();
+        renderBacktestStatus(state);
+        scheduleBacktestStatusPolling(state.status);
+        if (state.status === 'completed') {
+            loadBacktestList();
+        }
+    } catch(e) {
+        console.error(e);
+    }
+}
+
+async function runOneClickBacktest() {
+    const buttonEl = document.getElementById('runBacktestBtn');
+    if (buttonEl) buttonEl.disabled = true;
+    const payload = getBacktestFormPayload();
+
+    try {
+        const resp = await fetch('/api/backtest/run', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        const state = await resp.json();
+        renderBacktestStatus(state);
+        scheduleBacktestStatusPolling(state.status);
+
+        if (resp.ok || resp.status === 202) {
+            loadBacktestList();
+        }
+    } catch(e) {
+        console.error(e);
+        renderBacktestStatus({ status: 'failed', message: '一鍵回測啟動失敗' });
+    }
+}
+
 async function loadBacktestList() {
     try {
         const resp = await fetch('/api/strategies');

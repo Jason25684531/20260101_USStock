@@ -12,4 +12,6 @@ mysql-connector-python==8.1.0
 # Utilities
 python-dotenv==1.0.0
 cryptography==41.0.3
+google-genai>=1.0.0
+deep-translator>=1.11.4
 

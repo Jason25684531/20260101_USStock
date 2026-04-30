@@ -17,6 +17,9 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+STRATEGIES_SRC = PROJECT_ROOT / "strategies" / "src"
+if str(STRATEGIES_SRC) not in sys.path:
+    sys.path.insert(0, str(STRATEGIES_SRC))
 
 try:
     import matplotlib
@@ -28,10 +31,16 @@ try:
 except ImportError:
     MATPLOTLIB_AVAILABLE = False
 
-from strategies.src.config import BACKTEST_SYMBOLS, DB_URI, calc_atr
-from strategies.src.core.position_sizing import calculate_position_size
-from strategies.src.core.risk_manager import RiskManager
-from strategies.src.core.trading_costs import FRICTION_COST, calculate_friction_cost
+try:
+    from strategies.src.config import BACKTEST_SYMBOLS, DB_URI, calc_atr
+    from strategies.src.core.position_sizing import calculate_position_size
+    from strategies.src.core.risk_manager import RiskManager
+    from strategies.src.core.trading_costs import FRICTION_COST, calculate_friction_cost
+except ModuleNotFoundError:
+    from config import BACKTEST_SYMBOLS, DB_URI, calc_atr
+    from core.position_sizing import calculate_position_size
+    from core.risk_manager import RiskManager
+    from core.trading_costs import FRICTION_COST, calculate_friction_cost
 
 ML_STRATEGY_MODULE_PATH = PROJECT_ROOT / "strategies" / "src" / "strategies" / "ml_strategy.py"
 ML_STRATEGY_SPEC = importlib.util.spec_from_file_location("usstock_portfolio_ml_strategy", ML_STRATEGY_MODULE_PATH)

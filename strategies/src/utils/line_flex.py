@@ -87,6 +87,56 @@ def format_smart_money_pair(rec: Mapping) -> str:
     return f"{institutional} / {insider}"
 
 
+def format_smart_money_trend(rec: Mapping) -> str:
+    explicit = rec.get('smart_money_trend')
+    if explicit:
+        return str(explicit)
+
+    institutional_pass = rec.get('institutional_pass')
+    money_flow_pass = rec.get('money_flow_pass')
+    insider_sentiment = str(rec.get('insider_sentiment') or 'NEUTRAL').upper()
+
+    if institutional_pass is True and money_flow_pass is True:
+        return '偏多吸籌'
+    if institutional_pass is True:
+        return '法人偏多'
+    if money_flow_pass is True:
+        return '短線回流'
+    if insider_sentiment == 'BUYING':
+        return '內部人偏多'
+    if institutional_pass is False or insider_sentiment == 'SELLING':
+        return '偏保守'
+    return '待主力快照'
+
+
+def format_today_flow(rec: Mapping) -> str:
+    flow = rec.get('today_flow') if isinstance(rec.get('today_flow'), Mapping) else None
+    if flow:
+        rows = flow.get('rows') or []
+        if flow.get('is_fallback'):
+            return '快照待更新'
+
+        parts = []
+        trade_date = str(flow.get('trade_date') or '')
+        if trade_date:
+            parts.append(trade_date[5:] if len(trade_date) >= 10 else trade_date)
+        row_parts = []
+        for row in rows:
+            label = str(row.get('label') or '').strip()
+            value = str(row.get('value') or '').strip()
+            if not label or not value:
+                continue
+            row_parts.append(f'{label} {value}')
+        if row_parts:
+            parts.append(' / '.join(row_parts))
+        return ' '.join(part for part in parts if part).strip() or '未接入'
+
+    summary = rec.get('today_flow_summary')
+    if summary:
+        return str(summary)
+    return '快照待更新'
+
+
 def format_ml_confidence(value) -> str:
     try:
         if value is None or pd.isna(value):
@@ -110,6 +160,8 @@ def build_decision_bubble(rec: Mapping) -> dict:
         flex_kv("預期賣出", format_price_bound(rec.get('sell_price'), '>')),
         flex_section_title("🏦 籌碼與 AI"),
         flex_kv("法人 / 內部人", format_smart_money_pair(rec)),
+        flex_kv("大戶動向", format_smart_money_trend(rec)),
+        flex_kv("法人 / 內部人快照", format_today_flow(rec)),
         flex_kv("🤖 AI 勝率", format_ml_confidence(rec.get('ml_confidence'))),
     ]
 

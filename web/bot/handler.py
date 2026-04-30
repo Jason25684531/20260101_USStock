@@ -60,6 +60,326 @@ def _get_db_engine():
     return _db_engine
 
 
+def _log_linebot(message):
+    """Write LINE Bot logs without crashing on non-UTF-8 Windows consoles."""
+    text = str(message)
+    encoding = getattr(sys.stdout, 'encoding', None) or 'utf-8'
+    try:
+        print(text)
+    except UnicodeEncodeError:
+        safe_text = text.encode(encoding, errors='replace').decode(encoding, errors='replace')
+        print(safe_text)
+
+
+INSTITUTIONAL_FLOW_TABLE_CANDIDATES = (
+    {
+        'table': 'institutional_trading_daily',
+        'date': ['date', 'trade_date', 'data_date'],
+        'foreign_net': ['foreign_net', 'foreign_net_shares', 'foreign_net_volume'],
+        'foreign_buy': ['foreign_buy', 'foreign_buy_shares'],
+        'foreign_sell': ['foreign_sell', 'foreign_sell_shares'],
+        'trust_net': ['investment_trust_net', 'trust_net', 'institutional_trust_net'],
+        'trust_buy': ['investment_trust_buy', 'trust_buy'],
+        'trust_sell': ['investment_trust_sell', 'trust_sell'],
+        'dealer_net': ['dealer_net', 'self_dealer_net', 'proprietary_trader_net'],
+        'dealer_buy': ['dealer_buy', 'self_dealer_buy'],
+        'dealer_sell': ['dealer_sell', 'self_dealer_sell'],
+    },
+    {
+        'table': 'institutional_flows',
+        'date': ['date', 'trade_date', 'data_date'],
+        'foreign_net': ['foreign_net'],
+        'foreign_buy': ['foreign_buy'],
+        'foreign_sell': ['foreign_sell'],
+        'trust_net': ['trust_net', 'investment_trust_net'],
+        'trust_buy': ['trust_buy', 'investment_trust_buy'],
+        'trust_sell': ['trust_sell', 'investment_trust_sell'],
+        'dealer_net': ['dealer_net'],
+        'dealer_buy': ['dealer_buy'],
+        'dealer_sell': ['dealer_sell'],
+    },
+)
+
+
+def _resolve_existing_column(conn, table_name, column_candidates):
+    for column_name in column_candidates:
+        if _column_exists(conn, table_name, column_name):
+            return column_name
+    return None
+
+
+def _format_trade_date(value):
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.strftime('%Y-%m-%d')
+    if hasattr(value, 'strftime'):
+        try:
+            return value.strftime('%Y-%m-%d')
+        except Exception:
+            pass
+    return str(value)[:10]
+
+
+def _format_signed_number(value):
+    try:
+        if value is None:
+            return None
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return 'N/A'
+
+    sign = '+' if numeric > 0 else ''
+    abs_value = abs(numeric)
+    if abs_value >= 1_000_000_000:
+        formatted = f'{numeric / 1_000_000_000:.2f}B'
+    elif abs_value >= 1_000_000:
+        formatted = f'{numeric / 1_000_000:.2f}M'
+    elif abs_value >= 1_000:
+        formatted = f'{numeric:,.0f}'
+    else:
+        formatted = f'{numeric:.0f}'
+    return f'{sign}{formatted}'
+
+
+def _format_compact_number(value, suffix=''):
+    try:
+        if value is None:
+            return None
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+
+    abs_value = abs(numeric)
+    if abs_value >= 1_000_000_000:
+        formatted = f'{numeric / 1_000_000_000:.2f}B'
+    elif abs_value >= 1_000_000:
+        formatted = f'{numeric / 1_000_000:.2f}M'
+    elif abs_value >= 1_000:
+        formatted = f'{numeric / 1_000:.2f}K'
+    else:
+        formatted = f'{numeric:.0f}'
+    return f'{formatted}{suffix}'
+
+
+def _format_money_compact(value):
+    try:
+        if value is None:
+            return None
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+
+    abs_value = abs(numeric)
+    if abs_value >= 1_000_000_000:
+        return f'${numeric / 1_000_000_000:.2f}B'
+    if abs_value >= 1_000_000:
+        return f'${numeric / 1_000_000:.2f}M'
+    if abs_value >= 1_000:
+        return f'${numeric / 1_000:.2f}K'
+    return f'${numeric:.2f}'
+
+
+def _derive_flow_value(row, net_key, buy_key, sell_key):
+    try:
+        net_value = float(row.get(net_key)) if net_key and row.get(net_key) is not None else None
+    except (TypeError, ValueError):
+        net_value = None
+    if net_value is not None:
+        return net_value
+
+    try:
+        buy_value = float(row.get(buy_key)) if buy_key and row.get(buy_key) is not None else None
+        sell_value = float(row.get(sell_key)) if sell_key and row.get(sell_key) is not None else None
+    except (TypeError, ValueError):
+        return None
+
+    if buy_value is not None and sell_value is not None:
+        return buy_value - sell_value
+    return None
+
+
+def _load_actual_institutional_flow_snapshot(conn, symbol: str) -> dict | None:
+    if _table_exists(conn, 'us_institutional_activity'):
+        row = conn.execute(text("""
+            SELECT snapshot_date,
+                   institution_report_date,
+                   mutualfund_report_date,
+                   institution_total_shares,
+                   institution_total_value,
+                   mutualfund_total_shares,
+                   mutualfund_total_value,
+                   insider_buys_6m,
+                   insider_sells_6m,
+                   insider_net_shares_6m
+            FROM us_institutional_activity
+            WHERE symbol = :sym
+            ORDER BY snapshot_date DESC, updated_at DESC, id DESC
+            LIMIT 1
+        """), {'sym': symbol}).mappings().first()
+
+        if row:
+            institution_parts = []
+            mutualfund_parts = []
+            insider_parts = []
+
+            institution_shares = _format_compact_number(row.get('institution_total_shares'), '股')
+            institution_value = _format_money_compact(row.get('institution_total_value'))
+            if institution_shares:
+                institution_parts.append(institution_shares)
+            if institution_value:
+                institution_parts.append(institution_value)
+
+            mutualfund_shares = _format_compact_number(row.get('mutualfund_total_shares'), '股')
+            mutualfund_value = _format_money_compact(row.get('mutualfund_total_value'))
+            if mutualfund_shares:
+                mutualfund_parts.append(mutualfund_shares)
+            if mutualfund_value:
+                mutualfund_parts.append(mutualfund_value)
+
+            insider_net = _format_signed_number(row.get('insider_net_shares_6m'))
+            insider_buys = _format_compact_number(row.get('insider_buys_6m'), '股')
+            insider_sells = _format_compact_number(row.get('insider_sells_6m'), '股')
+            if insider_net and insider_net != 'N/A':
+                insider_parts.append(f'{insider_net}股')
+            if insider_buys or insider_sells:
+                insider_parts.append(f'買 {insider_buys or "N/A"} / 賣 {insider_sells or "N/A"}')
+
+            rows = [
+                {'label': '機構持股', 'value': ' / '.join(institution_parts) or 'N/A'},
+                {'label': '共同基金', 'value': ' / '.join(mutualfund_parts) or 'N/A'},
+                {'label': '內部人近6M', 'value': ' | '.join(insider_parts) or 'N/A'},
+            ]
+            if any(item['value'] != 'N/A' for item in rows):
+                snapshot_date = _format_trade_date(row.get('snapshot_date'))
+                report_notes = []
+                institution_report = _format_trade_date(row.get('institution_report_date'))
+                mutualfund_report = _format_trade_date(row.get('mutualfund_report_date'))
+                if institution_report:
+                    report_notes.append(f'機構揭露 {institution_report}')
+                if mutualfund_report:
+                    report_notes.append(f'基金揭露 {mutualfund_report}')
+
+                note = '資料來源: Yahoo Finance institutional_holders / mutualfund_holders / insider_purchases'
+                if report_notes:
+                    note = f"{note}；{'，'.join(report_notes)}"
+
+                summary = ' / '.join(f"{item['label']} {item['value']}" for item in rows if item['value'] != 'N/A')
+                return {
+                    'trade_date': snapshot_date,
+                    'date_label': '快照日期',
+                    'headline_label': '法人 / 內部人快照',
+                    'rows': rows,
+                    'source': 'us_holder_activity',
+                    'summary': f'{snapshot_date} 主力快照: {summary}' if snapshot_date else f'主力快照: {summary}',
+                    'note': note,
+                    'is_fallback': False,
+                }
+
+    from sqlalchemy import text as sql_text
+
+    for candidate in INSTITUTIONAL_FLOW_TABLE_CANDIDATES:
+        table_name = candidate['table']
+        if not _table_exists(conn, table_name) or not _column_exists(conn, table_name, 'symbol'):
+            continue
+
+        date_column = _resolve_existing_column(conn, table_name, candidate['date'])
+        if not date_column:
+            continue
+
+        resolved_columns = {
+            'foreign_net': _resolve_existing_column(conn, table_name, candidate['foreign_net']),
+            'foreign_buy': _resolve_existing_column(conn, table_name, candidate['foreign_buy']),
+            'foreign_sell': _resolve_existing_column(conn, table_name, candidate['foreign_sell']),
+            'trust_net': _resolve_existing_column(conn, table_name, candidate['trust_net']),
+            'trust_buy': _resolve_existing_column(conn, table_name, candidate['trust_buy']),
+            'trust_sell': _resolve_existing_column(conn, table_name, candidate['trust_sell']),
+            'dealer_net': _resolve_existing_column(conn, table_name, candidate['dealer_net']),
+            'dealer_buy': _resolve_existing_column(conn, table_name, candidate['dealer_buy']),
+            'dealer_sell': _resolve_existing_column(conn, table_name, candidate['dealer_sell']),
+        }
+
+        if not any(resolved_columns.values()):
+            continue
+
+        select_columns = [f'{date_column} AS trade_date']
+        for alias, column_name in resolved_columns.items():
+            if column_name:
+                select_columns.append(f'{column_name} AS {alias}')
+
+        row = conn.execute(sql_text(f"""
+            SELECT {', '.join(select_columns)}
+            FROM {table_name}
+            WHERE symbol = :sym
+            ORDER BY {date_column} DESC
+            LIMIT 1
+        """), {'sym': symbol}).mappings().first()
+
+        if not row:
+            continue
+
+        foreign_value = _derive_flow_value(row, 'foreign_net', 'foreign_buy', 'foreign_sell')
+        trust_value = _derive_flow_value(row, 'trust_net', 'trust_buy', 'trust_sell')
+        dealer_value = _derive_flow_value(row, 'dealer_net', 'dealer_buy', 'dealer_sell')
+        if all(value is None for value in (foreign_value, trust_value, dealer_value)):
+            continue
+
+        trade_date = _format_trade_date(row.get('trade_date'))
+        rows = [
+            {'label': '外資', 'value': _format_signed_number(foreign_value)},
+            {'label': '投信', 'value': _format_signed_number(trust_value)},
+            {'label': '自營商', 'value': _format_signed_number(dealer_value)},
+        ]
+        summary = ' / '.join(f"{item['label']} {item['value']}" for item in rows)
+        return {
+            'trade_date': trade_date,
+            'rows': rows,
+            'source': 'actual',
+            'summary': f'{trade_date} 三大法人買賣超: {summary}' if trade_date else f'三大法人買賣超: {summary}',
+            'note': f'資料來源: {table_name} 原始買賣超欄位',
+            'is_fallback': False,
+        }
+
+    return None
+
+
+def _build_smart_money_trend(institutional_pass, money_flow_pass, insider_sentiment='NEUTRAL'):
+    sentiment = str(insider_sentiment or 'NEUTRAL').upper()
+
+    if institutional_pass is True and money_flow_pass is True:
+        return '法人大戶偏多，疑似持續吸籌'
+    if institutional_pass is True:
+        return '法人偏多，短線流向待確認'
+    if money_flow_pass is True:
+        return '短線回流，法人態度觀察中'
+    if sentiment == 'BUYING':
+        return '內部人偏買方，先續看量價'
+    if institutional_pass is False or sentiment == 'SELLING':
+        return '大戶偏保守，暫未見明確加碼'
+    return '資料有限，待主力快照更新'
+
+
+def _build_today_flow_snapshot(conn, symbol: str, money_flow_pass=None) -> dict:
+    actual_snapshot = _load_actual_institutional_flow_snapshot(conn, symbol)
+    if actual_snapshot:
+        return actual_snapshot
+
+    return {
+        'trade_date': None,
+        'date_label': '快照日期',
+        'headline_label': '法人 / 內部人快照',
+        'rows': [
+            {'label': '機構持股', 'value': '待更新'},
+            {'label': '共同基金', 'value': '待更新'},
+            {'label': '內部人近6M', 'value': '待更新'},
+        ],
+        'source': 'unavailable',
+        'summary': '尚未建立美股機構 / 共同基金 / 內部人快照資料',
+        'note': '請先更新 us_institutional_activity 快照，LINE 才會顯示真實數值。',
+        'is_fallback': True,
+    }
+
+
 def _get_daily_screener_class():
     """延遲匯入 DailyScreener，避免 web 啟動時路徑問題。"""
     project_root = Path(__file__).resolve().parents[2]
@@ -85,11 +405,11 @@ def verify_signature(func):
         
         # 如果未配置 Channel Secret，允許請求通過（僅供開發環境）
         if not CHANNEL_SECRET:
-            print("⚠️  Channel Secret 未配置，跳過簽名驗證（僅限開發環境）")
+            _log_linebot("⚠️  Channel Secret 未配置，跳過簽名驗證（僅限開發環境）")
             return func(*args, **kwargs)
         
         if not signature:
-            print("❌ 缺少 X-Line-Signature 標頭")
+            _log_linebot("❌ 缺少 X-Line-Signature 標頭")
             abort(400, description="Missing X-Line-Signature header")
 
         try:
@@ -102,14 +422,14 @@ def verify_signature(func):
             expected = base64.b64encode(hash_value).decode('utf-8')
 
             if not hmac.compare_digest(signature, expected):
-                print("❌ 簽名驗證失敗")
-                print(f"   收到: {signature[:20]}...")
-                print(f"   預期: {expected[:20]}...")
+                _log_linebot("❌ 簽名驗證失敗")
+                _log_linebot(f"   收到: {signature[:20]}...")
+                _log_linebot(f"   預期: {expected[:20]}...")
                 abort(403, description="Invalid signature")
             
-            print("✅ 簽名驗證成功")
+            _log_linebot("✅ 簽名驗證成功")
         except Exception as e:
-            print(f"❌ 簽名驗證異常: {e}")
+            _log_linebot(f"❌ 簽名驗證異常: {e}")
             abort(403, description=f"Signature verification error: {str(e)}")
 
         return func(*args, **kwargs)
@@ -137,15 +457,15 @@ def callback():
     try:
         body = request.get_json()
         if not body:
-            print("⚠️  收到空的請求 body")
+            _log_linebot("⚠️  收到空的請求 body")
             return jsonify({'status': 'error', 'message': 'Empty body'}), 400
 
         events = body.get('events', [])
-        print(f"📨 收到 {len(events)} 個事件")
+        _log_linebot(f"📨 收到 {len(events)} 個事件")
 
         for event in events:
             event_type = event.get('type')
-            print(f"🔔 處理事件類型: {event_type}")
+            _log_linebot(f"🔔 處理事件類型: {event_type}")
             
             if event_type == 'message':
                 handle_message_event(event)
@@ -153,14 +473,14 @@ def callback():
                 handle_follow_event(event)
             elif event_type == 'unfollow':
                 user_id = event.get('source', {}).get('userId', 'unknown')
-                print(f"👋 用戶取消關注: {user_id}")
+                _log_linebot(f"👋 用戶取消關注: {user_id}")
             else:
-                print(f"📨 未處理事件: {event_type}")
+                _log_linebot(f"📨 未處理事件: {event_type}")
 
         return jsonify({'status': 'ok'}), 200
 
     except Exception as e:
-        print(f"❌ Webhook 處理錯誤: {type(e).__name__}: {e}")
+        _log_linebot(f"❌ Webhook 處理錯誤: {type(e).__name__}: {e}")
         import traceback
         traceback.print_exc()
         return jsonify({'status': 'error', 'message': str(e)}), 500
@@ -179,7 +499,7 @@ def handle_message_event(event: dict):
     user_id = event.get('source', {}).get('userId', 'unknown')
     reply_token = event.get('replyToken')
 
-    print(f"📩 收到文字消息: '{text}' from {user_id}")
+    _log_linebot(f"📩 收到文字消息: '{text}' from {user_id}")
 
     messages = process_command(text, user_id=user_id)
     if messages and reply_token:
@@ -190,7 +510,7 @@ def handle_follow_event(event: dict):
     """處理新用戶關注事件"""
     user_id = event.get('source', {}).get('userId', 'unknown')
     reply_token = event.get('replyToken')
-    print(f"👋 新用戶關注: {user_id}")
+    _log_linebot(f"👋 新用戶關注: {user_id}")
 
     welcome = (
         "🎉 歡迎使用美股量化交易系統！\n\n"
@@ -410,7 +730,7 @@ def _cmd_stock(symbol: str) -> List[dict]:
             return [_text_msg(msg)]
 
     except Exception as e:
-        print(f"❌ /stock 查詢失敗: {e}")
+        _log_linebot(f"❌ /stock 查詢失敗: {e}")
         return [_text_msg(f"❌ 查詢 {symbol} 失敗: {e}")]
 
 
@@ -521,7 +841,7 @@ def _cmd_market() -> List[dict]:
             return [_text_msg(msg)]
 
     except Exception as e:
-        print(f"❌ /market 查詢失敗: {e}")
+        _log_linebot(f"❌ /market 查詢失敗: {e}")
         return [_text_msg(f"❌ 宏觀資料查詢失敗: {e}")]
 
 
@@ -580,7 +900,7 @@ def _cmd_history(date_str: Optional[str] = None) -> List[dict]:
                 return [_text_msg(msg)]
 
     except Exception as e:
-        print(f"❌ /history 查詢失敗: {e}")
+        _log_linebot(f"❌ /history 查詢失敗: {e}")
         return [_text_msg(f"❌ 歷史推薦查詢失敗: {e}")]
 
 
@@ -655,7 +975,7 @@ def _cmd_sector() -> List[dict]:
             return [_text_msg("\n".join(lines))]
 
     except Exception as e:
-        print(f"❌ /sector 查詢失敗: {e}")
+        _log_linebot(f"❌ /sector 查詢失敗: {e}")
         return [_text_msg(f"❌ 產業動能查詢失敗: {e}")]
 
 
@@ -727,6 +1047,7 @@ def _cmd_top5() -> List[dict]:
                 SELECT symbol, rank_position, signal_type, total_score,
                        current_price, target_price, ml_confidence,
                        institutional_ownership, insider_sentiment,
+                      institutional_pass, money_flow_pass,
                        valuation_status, buy_price, sell_price, reason_summary,
                        support_1, resistance_1,
                        breakout_pass, acceleration_pass, peg_pass, dupont_pass
@@ -738,6 +1059,9 @@ def _cmd_top5() -> List[dict]:
 
             recs = []
             for row in rows:
+                institutional_pass = bool(row['institutional_pass']) if row['institutional_pass'] is not None else None
+                money_flow_pass = bool(row['money_flow_pass']) if row['money_flow_pass'] is not None else None
+                today_flow = _build_today_flow_snapshot(conn, row['symbol'], money_flow_pass=money_flow_pass)
                 recs.append({
                     'symbol': row['symbol'],
                     'rank': row['rank_position'],
@@ -748,6 +1072,10 @@ def _cmd_top5() -> List[dict]:
                     'ml_confidence': float(row['ml_confidence']) if row['ml_confidence'] else 0,
                     'institutional_ownership': float(row['institutional_ownership']) if row['institutional_ownership'] is not None else None,
                     'insider_sentiment': row['insider_sentiment'] or 'NEUTRAL',
+                    'institutional_pass': institutional_pass,
+                    'money_flow_pass': money_flow_pass,
+                    'smart_money_trend': _build_smart_money_trend(institutional_pass, money_flow_pass, row['insider_sentiment']),
+                    'today_flow': today_flow,
                     'valuation_status': row['valuation_status'] or 'FAIR',
                     'buy_price': float(row['buy_price']) if row['buy_price'] is not None else None,
                     'sell_price': float(row['sell_price']) if row['sell_price'] is not None else None,
@@ -774,7 +1102,7 @@ def _cmd_top5() -> List[dict]:
             return [flex]
 
     except Exception as e:
-        print(f"❌ Top5 查詢失敗: {e}")
+        _log_linebot(f"❌ Top5 查詢失敗: {e}")
         return [_text_msg(f"❌ 查詢失敗: {e}")]
 
 
@@ -804,6 +1132,7 @@ def _cmd_top5_basic() -> List[dict]:
                 SELECT symbol, rank_position, signal_type, total_score,
                        current_price, target_price, ml_confidence,
                        institutional_ownership, insider_sentiment,
+                      institutional_pass, money_flow_pass,
                        valuation_status, buy_price, sell_price, reason_summary,
                        support_1, resistance_1,
                        breakout_pass, acceleration_pass, peg_pass, dupont_pass
@@ -825,6 +1154,9 @@ def _cmd_top5_basic() -> List[dict]:
                 else:
                     rule_score = total_score
                 
+                institutional_pass = bool(row['institutional_pass']) if row['institutional_pass'] is not None else None
+                money_flow_pass = bool(row['money_flow_pass']) if row['money_flow_pass'] is not None else None
+                today_flow = _build_today_flow_snapshot(conn, row['symbol'], money_flow_pass=money_flow_pass)
                 recs.append({
                     'symbol': row['symbol'],
                     'rank': row['rank_position'],
@@ -835,6 +1167,10 @@ def _cmd_top5_basic() -> List[dict]:
                     'ml_confidence': 0,  # 強制顯示 0（無 ML）
                     'institutional_ownership': float(row['institutional_ownership']) if row['institutional_ownership'] is not None else None,
                     'insider_sentiment': row['insider_sentiment'] or 'NEUTRAL',
+                    'institutional_pass': institutional_pass,
+                    'money_flow_pass': money_flow_pass,
+                    'smart_money_trend': _build_smart_money_trend(institutional_pass, money_flow_pass, row['insider_sentiment']),
+                    'today_flow': today_flow,
                     'valuation_status': row['valuation_status'] or 'FAIR',
                     'buy_price': float(row['buy_price']) if row['buy_price'] is not None else None,
                     'sell_price': float(row['sell_price']) if row['sell_price'] is not None else None,
@@ -854,7 +1190,7 @@ def _cmd_top5_basic() -> List[dict]:
             return [_build_top5_flex(recs, f"{str(latest)} (純規則)")]
 
     except Exception as e:
-        print(f"❌ Top5 基礎版查詢失敗: {e}")
+        _log_linebot(f"❌ Top5 基礎版查詢失敗: {e}")
         return [_text_msg(f"❌ 查詢失敗: {e}")]
 
 
@@ -931,7 +1267,7 @@ def _cmd_ml(symbol: str) -> List[dict]:
             )]
 
     except Exception as e:
-        print(f"❌ ML 查詢失敗: {e}")
+        _log_linebot(f"❌ ML 查詢失敗: {e}")
         return [_text_msg(f"❌ 查詢 {symbol} 失敗: {e}")]
 
 
@@ -973,7 +1309,7 @@ def reply_messages(reply_token: str, messages: List[dict]):
         messages: LINE message object 列表
     """
     if not CHANNEL_TOKEN:
-        print("⚠️  Channel Token 未配置，無法回覆消息")
+        _log_linebot("⚠️  Channel Token 未配置，無法回覆消息")
         return
 
     try:
@@ -990,17 +1326,17 @@ def reply_messages(reply_token: str, messages: List[dict]):
             timeout=10,
         )
         if resp.status_code == 200:
-            print("✅ 消息回覆成功")
+            _log_linebot("✅ 消息回覆成功")
         else:
-            print(f"❌ 消息回覆失敗: {resp.status_code} - {resp.text}")
+            _log_linebot(f"❌ 消息回覆失敗: {resp.status_code} - {resp.text}")
     except Exception as e:
-        print(f"❌ 回覆請求失敗: {e}")
+        _log_linebot(f"❌ 回覆請求失敗: {e}")
 
 
 def push_message(user_id: str, messages: List[dict]) -> bool:
     """主動推播消息給指定 LINE 使用者。"""
     if not CHANNEL_TOKEN:
-        print("⚠️  Channel Token 未配置，無法主動推播")
+        _log_linebot("⚠️  Channel Token 未配置，無法主動推播")
         return False
 
     try:
@@ -1017,12 +1353,12 @@ def push_message(user_id: str, messages: List[dict]) -> bool:
             timeout=15,
         )
         if resp.status_code == 200:
-            print(f"✅ Push 成功: {user_id}")
+            _log_linebot(f"✅ Push 成功: {user_id}")
             return True
 
-        print(f"❌ Push 失敗: {resp.status_code} - {resp.text}")
+        _log_linebot(f"❌ Push 失敗: {resp.status_code} - {resp.text}")
     except Exception as e:
-        print(f"❌ Push 請求失敗: {e}")
+        _log_linebot(f"❌ Push 請求失敗: {e}")
 
     return False
 
@@ -1043,7 +1379,7 @@ def _run_screener_and_push(user_id: str):
         flex = _build_top5_flex(recommendations, datetime.now().strftime('%Y-%m-%d'))
         push_message(user_id, [flex])
     except Exception as e:
-        print(f"❌ 背景 Top5 掃描失敗: {type(e).__name__}: {e}")
+        _log_linebot(f"❌ 背景 Top5 掃描失敗: {type(e).__name__}: {e}")
         push_message(user_id, [_text_msg(f"❌ 最新掃描失敗: {e}")])
 
 

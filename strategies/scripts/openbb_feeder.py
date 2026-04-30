@@ -19,6 +19,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from strategies.src.config import DB_URI, NEWS_LIMIT, NEWS_PROVIDER, OPENBB_API_URL, UNIVERSE_TICKERS
+from strategies.src.adapters.institutional_activity import fetch_and_store_institutional_activity
 
 engine = create_engine(DB_URI)
 DEFAULT_FEED_SYMBOLS = tuple(sorted({symbol.upper() for symbol in UNIVERSE_TICKERS} | {"SPY"}))
@@ -162,10 +163,28 @@ def fetch_and_store_news(symbol: str, provider: str = NEWS_PROVIDER, limit: int 
         print(f"❌ 新聞抓取失敗 ({symbol}): {e}")
         return pd.DataFrame()
 
+
+def fetch_and_store_holder_activity(symbol: str):
+    print(f"🏦 正在抓取 {symbol} 的機構 / 基金 / 內部人快照...")
+    try:
+        snapshot = fetch_and_store_institutional_activity(symbol, db_uri=DB_URI)
+        if not snapshot:
+            print(f"⚠️ {symbol}: 主力籌碼快照為空")
+            return {}
+        print(
+            f"✅ {symbol}: 機構={snapshot.get('institution_total_shares')} | "
+            f"基金={snapshot.get('mutualfund_total_shares')} | 內部人近6M={snapshot.get('insider_net_shares_6m')}"
+        )
+        return snapshot
+    except Exception as error:
+        print(f"❌ 主力籌碼抓取失敗 ({symbol}): {error}")
+        return {}
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="OpenBB / yfinance data feeder")
     parser.add_argument("--symbols", type=str, default=None, help="逗號分隔股票代碼；未指定則使用 UNIVERSE + SPY")
     parser.add_argument("--skip-news", action="store_true", help="只更新價格，不抓新聞")
+    parser.add_argument("--skip-institutional", action="store_true", help="跳過機構 / 基金 / 內部人快照更新")
     parser.add_argument("--sleep", type=float, default=1.0, help="每檔之間等待秒數")
     args = parser.parse_args()
 
@@ -184,6 +203,8 @@ def main() -> int:
         fetch_and_store_price(ticker)
         if not args.skip_news:
             fetch_and_store_news(ticker)
+        if not args.skip_institutional:
+            fetch_and_store_holder_activity(ticker)
         if index < len(symbols) - 1 and args.sleep > 0:
             time.sleep(args.sleep)
 

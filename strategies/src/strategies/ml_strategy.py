@@ -17,10 +17,18 @@ if __package__ in (None, ""):
     REPO_ROOT = Path(__file__).resolve().parents[3]
     if str(REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(REPO_ROOT))
+    STRATEGIES_SRC = REPO_ROOT / "strategies" / "src"
+    if str(STRATEGIES_SRC) not in sys.path:
+        sys.path.insert(0, str(STRATEGIES_SRC))
 
-from strategies.src.config import DB_URI, UNIVERSE_TICKERS, calc_rsi
-from strategies.src.agents import SentimentAgent
-from strategies.src.core.position_sizing import calculate_position_size
+try:
+    from strategies.src.config import DB_URI, UNIVERSE_TICKERS, calc_rsi
+    from strategies.src.agents import SentimentAgent
+    from strategies.src.core.position_sizing import calculate_position_size
+except ModuleNotFoundError:
+    from config import DB_URI, UNIVERSE_TICKERS, calc_rsi
+    from agents import SentimentAgent
+    from core.position_sizing import calculate_position_size
 
 MODEL_MODULE_PATH = Path(__file__).resolve().parents[1] / "ml" / "model.py"
 MODEL_SPEC = importlib.util.spec_from_file_location("usstock_strategy_model", MODEL_MODULE_PATH)
@@ -806,7 +814,10 @@ def main() -> int:
     save_daily_screener_results(results_df, top_n=5)
 
     try:
-        from strategies.src.adapters.notifier import get_notifier
+        try:
+            from strategies.src.adapters.notifier import get_notifier
+        except ModuleNotFoundError:
+            from adapters.notifier import get_notifier
 
         notifier = get_notifier()
         if notifier.send_daily_screener_flex(top_n_df):

@@ -16,6 +16,8 @@ alpaca-trade-api==3.0.2
 torch==2.0.1
 transformers==4.31.0
 edgartools==2.16.0
+google-genai>=1.0.0
+deep-translator>=1.11.4
 
 # --- Web Backend & Monitoring ---
 Flask==2.3.3
