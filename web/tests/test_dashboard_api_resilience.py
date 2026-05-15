@@ -62,6 +62,21 @@ class DashboardApiResilienceTests(unittest.TestCase):
         self.assertEqual(response.get_json()['holdings'], [])
         self.assertTrue(response.get_json()['degraded'])
 
+    def test_portfolio_state_degrades_when_database_unavailable(self):
+        failing_engine = Mock()
+        failing_engine.connect.side_effect = self._recoverable_connect_error()
+
+        with patch.object(web_app_module, 'engine', failing_engine):
+            response = self.client.get('/api/portfolio/state')
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload['holdings'], [])
+        self.assertEqual(payload['sector_breakdown'], [])
+        self.assertEqual(payload['correlation']['symbols'], [])
+        self.assertEqual(payload['correlation']['matrix'], [])
+        self.assertTrue(payload['degraded'])
+
     def test_macro_degrades_when_database_unavailable(self):
         failing_engine = Mock()
         failing_engine.connect.side_effect = self._recoverable_connect_error()

@@ -243,6 +243,26 @@
             </div>
         </div>
     </div>
+    <div class="row">
+        <div class="col-lg-4">
+            <div class="card">
+                <div class="card-header card-header-dark">持倉分析摘要</div>
+                <div class="card-body" id="portfolioSummaryBody">
+                    <div class="text-muted">讀取中...</div>
+                </div>
+            </div>
+        </div>
+        <div class="col-lg-8">
+            <div class="card">
+                <div class="card-header card-header-pink">Correlation Heatmap</div>
+                <div class="card-body">
+                    <div id="correlationHeatmap" class="correlation-heatmap-shell">
+                        <div class="text-muted">讀取中...</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
 </div>
 
 <!-- ======================== TAB: 回測 ======================== -->
@@ -402,6 +422,9 @@
                 <tr><th>最新推薦日期</th><td id="sysLatestRec">-</td></tr>
                 <tr><th>策略引擎版本</th><td>v2 — 11 策略 Registry + ML</td></tr>
                 <tr><th>ML 模型</th><td id="sysMl">-</td></tr>
+                <tr><th>Universe Sync</th><td id="sysUniverseSync">-</td></tr>
+                <tr><th>Universe 進度</th><td id="sysUniverseProgress">-</td></tr>
+                <tr><th>Universe 更新時間</th><td id="sysUniverseUpdated">-</td></tr>
             </table>
         </div>
     </div>
@@ -1387,6 +1410,128 @@ function buildSectorPie(holdings) {
             plugins: { legend: { position: 'bottom', labels: { font: { size: 11 } } } }
         }
     });
+}
+
+async function loadPortfolioAnalytics() {
+    try {
+        const resp = await fetch('/api/portfolio/state');
+        const data = await resp.json();
+        syncBackendStatus('portfolio_state', data, '持倉分析暫時不可用');
+        renderPortfolioSummary(data.summary || {});
+        renderCorrelationHeatmap(data.correlation || {});
+        if (Array.isArray(data.sector_breakdown) && data.sector_breakdown.length) {
+            buildSectorPieFromBreakdown(data.sector_breakdown);
+        }
+    } catch (e) {
+        console.error(e);
+    }
+}
+
+function buildSectorPieFromBreakdown(sectorBreakdown) {
+    const labels = [];
+    const values = [];
+    const colors = ['#667eea','#00c853','#f5576c','#ffd200','#4facfe','#764ba2','#ff9100','#11998e','#999'];
+    (sectorBreakdown || []).forEach(item => {
+        if (!item?.sector) return;
+        labels.push(item.sector);
+        values.push(Number(item.count || 0));
+    });
+
+    const canvas = document.getElementById('sectorPieChart');
+    if (!canvas) return;
+    const chartData = {
+        labels,
+        datasets: [{ data: values, backgroundColor: colors.slice(0, labels.length) }],
+    };
+
+    if (sectorPieChart) {
+        sectorPieChart.data.labels = chartData.labels;
+        sectorPieChart.data.datasets[0].data = chartData.datasets[0].data;
+        sectorPieChart.data.datasets[0].backgroundColor = chartData.datasets[0].backgroundColor;
+        sectorPieChart.update('none');
+        return;
+    }
+
+    const ctx = canvas.getContext('2d');
+    sectorPieChart = new Chart(ctx, {
+        type: 'doughnut',
+        data: chartData,
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            animation: false,
+            plugins: { legend: { position: 'bottom', labels: { font: { size: 11 } } } }
+        }
+    });
+}
+
+function renderPortfolioSummary(summary = {}) {
+    const el = document.getElementById('portfolioSummaryBody');
+    if (!el) return;
+    const positions = Number(summary.positions || 0);
+    const sectors = Number(summary.distinct_sectors || 0);
+    const symbols = Array.isArray(summary.symbols) ? summary.symbols : [];
+    el.innerHTML = `
+        <div class="portfolio-summary-grid">
+            <div class="portfolio-summary-item">
+                <div class="portfolio-summary-label">持倉檔數</div>
+                <div class="portfolio-summary-value">${positions}</div>
+            </div>
+            <div class="portfolio-summary-item">
+                <div class="portfolio-summary-label">產業分布</div>
+                <div class="portfolio-summary-value">${sectors}</div>
+            </div>
+        </div>
+        <div class="small text-muted mt-3">${symbols.length ? `標的：${symbols.join(', ')}` : '目前沒有可分析的持倉'}</div>
+    `;
+}
+
+function correlationCellColor(value) {
+    if (value == null) return '#25302a';
+    if (value >= 0.75) return '#b42318';
+    if (value >= 0.4) return '#f97066';
+    if (value >= 0.2) return '#f6ad55';
+    if (value >= 0) return '#5df28c';
+    return '#1f9d68';
+}
+
+function renderCorrelationHeatmap(correlation = {}) {
+    const host = document.getElementById('correlationHeatmap');
+    if (!host) return;
+
+    const symbols = Array.isArray(correlation.symbols) ? correlation.symbols : [];
+    const matrix = Array.isArray(correlation.matrix) ? correlation.matrix : [];
+    const reason = correlation.reason || '目前沒有可分析的持倉';
+    if (!symbols.length || !matrix.length) {
+        host.innerHTML = `<div class="text-muted py-3">${reason}</div>`;
+        return;
+    }
+
+    const cellSize = 42;
+    const labelOffset = 90;
+    const width = labelOffset + symbols.length * cellSize + 8;
+    const height = labelOffset + symbols.length * cellSize + 8;
+    const cells = [];
+
+    symbols.forEach((rowSymbol, rowIndex) => {
+        const y = labelOffset + rowIndex * cellSize;
+        cells.push(`<text x="84" y="${y + 26}" class="corr-axis-label" text-anchor="end">${rowSymbol}</text>`);
+        cells.push(`<text x="${labelOffset + rowIndex * cellSize + 21}" y="72" class="corr-axis-label" text-anchor="middle">${rowSymbol}</text>`);
+        (matrix[rowIndex] || []).forEach((value, colIndex) => {
+            const x = labelOffset + colIndex * cellSize;
+            const fill = correlationCellColor(value);
+            const textValue = value == null ? '-' : Number(value).toFixed(2);
+            cells.push(`<rect x="${x}" y="${y}" width="${cellSize - 4}" height="${cellSize - 4}" rx="8" fill="${fill}"></rect>`);
+            cells.push(`<text x="${x + 19}" y="${y + 24}" class="corr-cell-label" text-anchor="middle">${textValue}</text>`);
+        });
+    });
+
+    host.innerHTML = `
+        <div class="small text-muted mb-2">窗口：${correlation.window_days || 60} 個交易日</div>
+        <svg viewBox="0 0 ${width} ${height}" class="correlation-heatmap-svg" role="img" aria-label="Portfolio correlation heatmap">
+            ${cells.join('')}
+        </svg>
+    `;
 }
 
 // ============================================

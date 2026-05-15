@@ -25,7 +25,8 @@ sys.path.insert(0, str(_SRC_DIR))
 
 from screener.support_resistance import calc_support_resistance
 from config import DEFAULT_SYMBOLS, evaluate_stock_rules_v2
-from strategies.fundamental import calculate_valuation_targets
+from policies.valuation import GrowthAwarePolicy
+from symbol_registry import load_default_active_symbols
 
 
 class DailyScreener:
@@ -168,10 +169,11 @@ class DailyScreener:
             top_n: 輸出 Top N 推薦
             delay: yfinance 請求間隔秒數, 避免限流
         """
-        self.symbols = symbols or DEFAULT_SYMBOLS
+        self.symbols = symbols or load_default_active_symbols(fallback_symbols=DEFAULT_SYMBOLS)
         self.top_n = top_n
         self.delay = delay
         self._ml_strategy = None
+        self._valuation_policy = GrowthAwarePolicy()
         
         # 自動偵測 ML 模型
         if use_ml is None:
@@ -292,7 +294,16 @@ class DailyScreener:
             or info.get('epsTrailingTwelveMonths')
             or info.get('epsCurrentYear')
         )
-        valuation = calculate_valuation_targets(current_price=current_price, eps_ttm=eps_ttm)
+        revenue_growth_yoy = self._normalize_optional_number(
+            info.get('revenueGrowth')
+            or info.get('revenue_growth_yoy')
+            or info.get('revenue_growth')
+        )
+        valuation = self._valuation_policy.evaluate(
+            current_price=current_price,
+            eps_ttm=eps_ttm,
+            revenue_growth_yoy=revenue_growth_yoy,
+        )
 
         # --- 全策略評估（v2 Registry 版本）---
         eval_result = evaluate_stock_rules_v2(df, info, symbol=symbol)
@@ -360,6 +371,7 @@ class DailyScreener:
             'peg_ratio': info.get('pegRatio') or info.get('trailingPegRatio'),
             'pb_ratio': info.get('priceToBook'),
             'roe': info.get('returnOnEquity'),
+            'revenue_growth_yoy': revenue_growth_yoy,
             'fair_price': valuation.get('fair_price'),
             'buy_price': valuation.get('buy_price'),
             'sell_price': valuation.get('sell_price'),

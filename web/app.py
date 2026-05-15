@@ -14,6 +14,7 @@ import logging
 import sys
 import threading
 from pathlib import Path
+import pandas as pd
 from dotenv import load_dotenv
 from flask import Flask, render_template, jsonify, request
 from flask_httpauth import HTTPBasicAuth
@@ -46,6 +47,9 @@ engine = get_engine(DB_CONFIG, echo=False)
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+STRATEGIES_SRC_ROOT = PROJECT_ROOT / 'strategies' / 'src'
+if str(STRATEGIES_SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(STRATEGIES_SRC_ROOT))
 
 ONECLICK_BACKTEST_SCRIPT = PROJECT_ROOT / 'strategies' / 'src' / 'main.py'
 
@@ -176,6 +180,136 @@ def _handle_dashboard_exception(endpoint_name, payload, error):
     if _is_recoverable_dashboard_error(error):
         return _dashboard_degraded_response(endpoint_name, payload, error)
     return _dashboard_failure_response(endpoint_name, error)
+
+
+def _build_empty_correlation_payload(reason: str = ""):
+    return {
+        'window_days': 60,
+        'symbols': [],
+        'matrix': [],
+        'reason': reason,
+    }
+
+
+def _load_latest_sector_map(conn, symbols):
+    if not symbols or not _table_exists(conn, 'stock_fundamentals') or not _column_exists(conn, 'stock_fundamentals', 'sector'):
+        return {}
+
+    placeholders = ", ".join(f":s{i}" for i in range(len(symbols)))
+    params = {f"s{i}": symbol for i, symbol in enumerate(symbols)}
+    query = text(f"""
+        SELECT sf.symbol, sf.sector
+        FROM stock_fundamentals sf
+        INNER JOIN (
+            SELECT symbol, MAX(data_date) AS latest_data_date
+            FROM stock_fundamentals
+            WHERE symbol IN ({placeholders})
+            GROUP BY symbol
+        ) latest
+          ON sf.symbol = latest.symbol
+         AND sf.data_date = latest.latest_data_date
+        WHERE sf.symbol IN ({placeholders})
+    """)
+
+    sector_map = {}
+    for row in conn.execute(query, params):
+        sector_map[str(row[0]).upper()] = row[1]
+    return sector_map
+
+
+def _load_portfolio_state_holdings(conn):
+    if not _table_exists(conn, 'trade_logs'):
+        return []
+
+    rows = conn.execute(text("""
+        SELECT symbol, entry_date, entry_price
+        FROM trade_logs
+        WHERE exit_date IS NULL
+        ORDER BY entry_date DESC, id DESC
+    """))
+    holdings = [
+        {
+            'symbol': str(row[0]).upper(),
+            'entry_date': str(row[1]) if row[1] else None,
+            'entry_price': float(row[2]) if row[2] is not None else None,
+        }
+        for row in rows
+    ]
+    if not holdings:
+        return []
+
+    symbols = [holding['symbol'] for holding in holdings]
+    sector_map = _load_latest_sector_map(conn, symbols)
+    if len(sector_map) < len(symbols):
+        from constants import SECTOR_MAP_FALLBACK
+        for symbol in symbols:
+            sector_map.setdefault(symbol, SECTOR_MAP_FALLBACK.get(symbol, 'Unknown'))
+
+    for holding in holdings:
+        holding['sector'] = sector_map.get(holding['symbol'], 'Unknown')
+    return holdings
+
+
+def _load_price_history_for_symbols(symbols, lookback_days: int = 120):
+    if not symbols:
+        return {}
+
+    placeholders = ", ".join(f":s{i}" for i in range(len(symbols)))
+    params = {f"s{i}": symbol for i, symbol in enumerate(symbols)}
+    safe_lookback_days = max(int(lookback_days), 1)
+    query = text(f"""
+        SELECT symbol, date, close
+        FROM price_data_v2
+        WHERE symbol IN ({placeholders})
+          AND date >= DATE_SUB(CURDATE(), INTERVAL {safe_lookback_days} DAY)
+        ORDER BY symbol ASC, date ASC
+    """)
+
+    price_df = pd.read_sql(query, con=engine, params=params)
+    if price_df.empty:
+        return {}
+
+    price_df['date'] = pd.to_datetime(price_df['date'])
+    history = {}
+    for symbol, group in price_df.groupby('symbol'):
+        history[str(symbol).upper()] = group[['date', 'close']].set_index('date')
+    return history
+
+
+def _build_universe_sync_payload(conn):
+    empty_payload = {
+        'universe_code': None,
+        'status': 'unavailable',
+        'processed_symbols': 0,
+        'total_symbols': 0,
+        'progress_pct': 0.0,
+        'finished_at': None,
+        'error_message': None,
+    }
+    if not _table_exists(conn, 'universe_sync_runs'):
+        return empty_payload
+
+    row = conn.execute(text("""
+        SELECT universe_code, status, processed_symbols, total_symbols, finished_at, error_message
+        FROM universe_sync_runs
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1
+    """)).mappings().first()
+    if not row:
+        return empty_payload
+
+    total_symbols = int(row['total_symbols'] or 0)
+    processed_symbols = int(row['processed_symbols'] or 0)
+    progress_pct = round((processed_symbols / total_symbols) * 100, 1) if total_symbols > 0 else 0.0
+    return {
+        'universe_code': row['universe_code'],
+        'status': row['status'],
+        'processed_symbols': processed_symbols,
+        'total_symbols': total_symbols,
+        'progress_pct': progress_pct,
+        'finished_at': str(row['finished_at']) if row['finished_at'] else None,
+        'error_message': row['error_message'],
+    }
 
 # ============================================
 # Web 認證配置
@@ -2132,6 +2266,75 @@ def get_portfolio():
 # ============================================
 # 宏觀指標 API
 # ============================================
+@app.route('/api/portfolio/state')
+@auth.login_required
+def get_portfolio_state():
+    empty_payload = {
+        'holdings': [],
+        'summary': {},
+        'sector_breakdown': [],
+        'correlation': _build_empty_correlation_payload(),
+        'source': 'open_positions',
+    }
+
+    try:
+        from analytics.correlation_engine import build_correlation_payload, build_sector_breakdown
+
+        with engine.connect() as conn:
+            holdings = _load_portfolio_state_holdings(conn)
+            if not holdings:
+                return jsonify({
+                    'holdings': [],
+                    'summary': {'positions': 0, 'distinct_sectors': 0},
+                    'sector_breakdown': [],
+                    'correlation': _build_empty_correlation_payload('目前沒有未平倉持倉'),
+                    'source': 'open_positions',
+                })
+
+        price_history = _load_price_history_for_symbols([holding['symbol'] for holding in holdings])
+        sector_breakdown = build_sector_breakdown(holdings)
+        correlation = build_correlation_payload(
+            [holding['symbol'] for holding in holdings],
+            price_history,
+            window_days=60,
+        )
+        summary = {
+            'positions': len(holdings),
+            'distinct_sectors': len(sector_breakdown),
+            'symbols': [holding['symbol'] for holding in holdings],
+        }
+        return jsonify({
+            'holdings': holdings,
+            'summary': summary,
+            'sector_breakdown': sector_breakdown,
+            'correlation': correlation,
+            'source': 'open_positions',
+        })
+
+    except Exception as e:
+        return _handle_dashboard_exception('portfolio_state', empty_payload, e)
+
+
+@app.route('/api/universe/sync-status')
+@auth.login_required
+def get_universe_sync_status():
+    empty_payload = {
+        'universe_code': None,
+        'status': 'unavailable',
+        'processed_symbols': 0,
+        'total_symbols': 0,
+        'progress_pct': 0.0,
+        'finished_at': None,
+        'error_message': None,
+    }
+
+    try:
+        with engine.connect() as conn:
+            return jsonify(_build_universe_sync_payload(conn))
+    except Exception as e:
+        return _handle_dashboard_exception('universe_sync_status', empty_payload, e)
+
+
 @app.route('/api/macro')
 @auth.login_required
 def get_macro():
