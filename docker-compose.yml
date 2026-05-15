@@ -61,6 +61,7 @@ services:
         condition: service_healthy
     env_file: .env
     environment:
+      - PYTHONPATH=/app  # 👈 關鍵：加入這一行
       - DB_HOST=db
       - DB_PORT=3306
       - DB_USER=root
@@ -69,8 +70,10 @@ services:
       - WEB_PORT=6688
     volumes:
       - ./web:/app
+      - ./utils:/app/utils
     ports:
       - "6688:5000"
+    # ... 其餘設定保持不變
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:5000/health')\""]
       interval: 30s
