@@ -18,6 +18,11 @@ from sklearn.model_selection import train_test_split
 import warnings
 warnings.filterwarnings('ignore')
 
+try:
+    from utils.runtime_config import get_model_load_candidates, resolve_model_path
+except ImportError:
+    from strategies.src.utils.runtime_config import get_model_load_candidates, resolve_model_path
+
 # 嘗試導入 XGBoost
 try:
     from xgboost import XGBClassifier
@@ -307,12 +312,11 @@ class StrategyModel:
         
         if filepath is None:
             # 默認保存到 data/ 目錄
-            project_root = Path(__file__).parent.parent.parent.parent
-            data_dir = project_root / 'data'
-            data_dir.mkdir(exist_ok=True)
-            filepath = data_dir / 'model.pkl'
+            filepath = resolve_model_path()
         
-        filepath = Path(filepath)
+        load_candidates = get_model_load_candidates(explicit_path=filepath)
+        filepath = next((candidate for candidate in load_candidates if candidate.exists()), None)
+        filepath.parent.mkdir(parents=True, exist_ok=True)
         
         # 保存模型和元數據
         model_data = {
@@ -342,15 +346,14 @@ class StrategyModel:
         """
         if filepath is None:
             # 默認從 data/ 目錄加載，優先 model.pkl，fallback test_model.pkl
-            project_root = Path(__file__).parent.parent.parent.parent
-            filepath = project_root / 'data' / 'model.pkl'
-            if not filepath.exists():
-                filepath = project_root / 'data' / 'test_model.pkl'
+            filepath = None
         
-        filepath = Path(filepath)
+        load_candidates = get_model_load_candidates(explicit_path=filepath)
+        filepath = next((candidate for candidate in load_candidates if candidate.exists()), None)
         
-        if not filepath.exists():
-            raise FileNotFoundError(f"模型文件不存在: {filepath} (也檢查了 test_model.pkl)")
+        if filepath is None:
+            searched_paths = ", ".join(str(candidate) for candidate in load_candidates)
+            raise FileNotFoundError(f"模型文件不存在，已檢查路徑: {searched_paths}")
         
         with open(filepath, 'rb') as f:
             model_data = pickle.load(f)

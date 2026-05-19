@@ -59,6 +59,11 @@ if str(STRATEGIES_SRC_ROOT) not in sys.path:
 
 ONECLICK_BACKTEST_SCRIPT = STRATEGIES_SRC_ROOT / 'main.py'
 
+try:
+    from utils.runtime_config import find_existing_model_path
+except ImportError:
+    from strategies.src.utils.runtime_config import find_existing_model_path
+
 
 # Aliases for backward compatibility (previously defined locally)
 _table_exists = table_exists
@@ -532,14 +537,9 @@ def get_ml_status():
     # 1. 嘗試讀取模型的 feature importance（從 model.pkl）
     try:
         import pickle
-        from pathlib import Path
+        model_path = find_existing_model_path()
 
-        model_path = Path('/app/data/model.pkl')
-        # 也嘗試本機開發路徑
-        if not model_path.exists():
-            model_path = Path(__file__).parent.parent / 'data' / 'model.pkl'
-
-        if model_path.exists():
+        if model_path is not None and model_path.exists():
             with open(model_path, 'rb') as f:
                 model_data = pickle.load(f)
             fi = model_data.get('feature_importance')

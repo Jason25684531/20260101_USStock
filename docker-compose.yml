@@ -42,6 +42,11 @@ services:
       - DB_USER=trader
       - DB_NAME=usstock
       - USE_SCHEDULER=true
+      - STRATEGY_TYPE=screener
+      - SCREENER_TOP_N=5
+      - SCHEDULER_HOUR=16
+      - SCHEDULER_MINUTE=15
+      - MODEL_PATH=/app/data/model.pkl
       - TZ=America/New_York
       - TRADING_MODE=simulation
     volumes:
@@ -71,12 +76,14 @@ services:
       - PYTHONPATH=/app  # 👈 關鍵：加入這一行
       - DB_HOST=db
       - DB_PORT=3306
-      - DB_USER=root
+      - DB_USER=trader
       - DB_NAME=usstock
       - TZ=America/New_York
       - WEB_PORT=6688
+      - MODEL_PATH=/app/data/model.pkl
     volumes:
       - .:/app
+      - ./data:/app/data
     working_dir: /app/web
     ports:
       - "6688:5000"

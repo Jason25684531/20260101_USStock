@@ -39,29 +39,36 @@ services:
 
   strategy_engine:
     build:
-      context: ./strategies
+      context: .
+      dockerfile: strategies/Dockerfile
     container_name: usstock_strategy_engine
     restart: always
     depends_on:
       db:
         condition: service_healthy
     environment:
+      - PYTHONPATH=/app
       - PYTHONUNBUFFERED=1
       - DB_HOST=db
       - DB_PORT=3306
-      - DB_USER=root
+      - DB_USER=trader
       - DB_NAME=usstock
       - USE_SCHEDULER=true
+      - STRATEGY_TYPE=screener
+      - SCREENER_TOP_N=5
+      - SCHEDULER_HOUR=16
+      - SCHEDULER_MINUTE=15
+      - MODEL_PATH=/app/data/model.pkl
       - TZ=America/New_York
     secrets:
-      - db_root_password
+      - db_password
       - alpaca_key
       - alpaca_secret
       - line_channel_token
       - line_user_id
     volumes:
-      - ./strategies/src:/app/src
-    command: ["python", "src/main.py"]
+      - ./data:/app/data
+    command: ["python", "strategies/src/main.py"]
     networks:
       - usstock_network
     deploy:
@@ -73,30 +80,34 @@ services:
 
   web_dashboard:
     build:
-      context: ./web
+      context: .
+      dockerfile: web/Dockerfile
     container_name: usstock_web_dashboard
     restart: always
     depends_on:
       db:
         condition: service_healthy
     environment:
+      - PYTHONPATH=/app
       - DB_HOST=db
       - DB_PORT=3306
-      - DB_USER=root
+      - DB_USER=trader
       - DB_NAME=usstock
       - TZ=America/New_York
+      - WEB_PORT=6688
+      - MODEL_PATH=/app/data/model.pkl
     secrets:
-      - db_root_password
+      - db_password
       - web_password
       - line_channel_token
       - line_channel_secret
       - line_user_id
     volumes:
-      - ./web:/app
+      - ./data:/app/data
     ports:
       - "6688:6688"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:6688/health"]
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:6688/health')\""]
       interval: 30s
       timeout: 10s
       retries: 3

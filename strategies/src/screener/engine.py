@@ -11,10 +11,12 @@
 """
 import sys
 import json
+import os
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from pathlib import Path
 from datetime import date
-from typing import List, Dict, Optional, Tuple
+from typing import Any, List, Dict, Optional, Tuple
 
 import pandas as pd
 import yfinance as yf
@@ -24,9 +26,19 @@ _SRC_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(_SRC_DIR))
 
 from screener.support_resistance import calc_support_resistance
+from screener.market_data_resilience import (
+    ERROR_NO_PRICE_DATA,
+    STATUS_FALLBACK_SUCCESS,
+    STATUS_LIVE_SUCCESS,
+    MarketDataFetchResult,
+    build_provider_health_summary,
+    classify_provider_error,
+    is_retryable_status,
+)
 from config import DEFAULT_SYMBOLS, evaluate_stock_rules_v2
 from policies.valuation import GrowthAwarePolicy
 from symbol_registry import load_default_active_symbols
+from utils.runtime_config import find_existing_model_path
 
 
 class DailyScreener:
@@ -172,16 +184,33 @@ class DailyScreener:
         self.symbols = symbols or load_default_active_symbols(fallback_symbols=DEFAULT_SYMBOLS)
         self.top_n = top_n
         self.delay = delay
+        self.market_data_retry_count = max(0, int(os.getenv('MARKET_DATA_RETRY_COUNT', '2')))
+        self.market_data_timeout_seconds = max(1.0, float(os.getenv('MARKET_DATA_TIMEOUT_SECONDS', '15')))
+        self.market_data_retry_backoff_seconds = max(0.0, float(os.getenv('MARKET_DATA_RETRY_BACKOFF_SECONDS', '1')))
+        self.market_data_max_age_days = max(0, int(os.getenv('MARKET_DATA_MAX_AGE_DAYS', '3')))
+        self.minimum_coverage_ratio = min(
+            1.0,
+            max(0.0, float(os.getenv('SCREENER_MIN_COVERAGE_RATIO', '0.6'))),
+        )
         self._ml_strategy = None
         self._valuation_policy = GrowthAwarePolicy()
+        self._fallback_db = None
+        self._latest_fetch_results: Dict[str, MarketDataFetchResult] = {}
+        self.last_run_summary: Dict[str, Any] = {
+            'total_symbols': len(self.symbols),
+            'live_successes': 0,
+            'fallback_successes': 0,
+            'failed_symbols': [],
+            'skipped_symbols': [],
+            'valid_symbols': 0,
+            'coverage_ratio': 0.0,
+            'minimum_coverage_ratio': self.minimum_coverage_ratio,
+            'recommendations_written': False,
+        }
         
         # 自動偵測 ML 模型
         if use_ml is None:
-            # 若 data/model.pkl 或 data/test_model.pkl 存在，自動啟用 ML
-            data_dir = Path(__file__).parent.parent.parent / 'data'
-            model_path = data_dir / 'model.pkl'
-            test_model_path = data_dir / 'test_model.pkl'
-            self.use_ml = model_path.exists() or test_model_path.exists()
+            self.use_ml = find_existing_model_path() is not None
         else:
             self.use_ml = use_ml
 
@@ -189,7 +218,7 @@ class DailyScreener:
             self._init_ml()
 
     def _init_ml(self):
-        """嘗試載入 ML 模型 (從 data/model.pkl，若不存在則降級)"""
+        """嘗試載入 ML 模型 (使用共享 MODEL_PATH 規則載入)"""
         try:
             from ml.model import StrategyModel
             from ml.features import make_features, get_feature_columns
@@ -239,7 +268,140 @@ class DailyScreener:
     # 數據獲取
     # ----------------------------------------------------------
 
+    def _get_fallback_db(self):
+        if self._fallback_db is None:
+            from adapters.database import DatabaseAdapter
+
+            self._fallback_db = DatabaseAdapter()
+        return self._fallback_db
+
+    @staticmethod
+    def _normalize_price_frame(df: pd.DataFrame) -> pd.DataFrame:
+        if df is None or df.empty:
+            return df
+
+        normalized = df.copy()
+        rename_map = {
+            'open': 'Open',
+            'high': 'High',
+            'low': 'Low',
+            'close': 'Close',
+            'volume': 'Volume',
+            'adj_close': 'Adj Close',
+        }
+        for source, target in rename_map.items():
+            if source in normalized.columns and target not in normalized.columns:
+                normalized[target] = normalized[source]
+        return normalized
+
+    def _fetch_live_stock_data_once(self, symbol: str) -> Tuple[pd.DataFrame, dict]:
+        ticker = yf.Ticker(symbol)
+        df = ticker.history(period='1y', interval='1d')
+        if df.empty:
+            raise ValueError("No price data found")
+
+        info = {}
+        try:
+            info = ticker.info or {}
+        except Exception as exc:
+            print(f"    [provider-info-warning] symbol={symbol} provider=yfinance message={exc}")
+
+        return self._normalize_price_frame(df), info
+
+    def _fetch_live_stock_data_with_timeout(self, symbol: str) -> Tuple[pd.DataFrame, dict]:
+        executor = ThreadPoolExecutor(max_workers=1)
+        future = executor.submit(self._fetch_live_stock_data_once, symbol)
+        try:
+            return future.result(timeout=self.market_data_timeout_seconds)
+        except FuturesTimeoutError as exc:
+            future.cancel()
+            raise TimeoutError(
+                f"provider timeout after {self.market_data_timeout_seconds}s"
+            ) from exc
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+
+    def _load_market_data_fallback(self, symbol: str) -> Tuple[Optional[pd.DataFrame], Optional[int]]:
+        df = self._get_fallback_db().get_market_data(symbol)
+        if df is None or df.empty:
+            return None, None
+
+        normalized = self._normalize_price_frame(df)
+        latest_timestamp = pd.to_datetime(normalized.index.max())
+        age_days = max(0, (pd.Timestamp(date.today()) - latest_timestamp.normalize()).days)
+        return normalized, age_days
+
+    def _store_fetch_result(self, result: MarketDataFetchResult) -> MarketDataFetchResult:
+        self._latest_fetch_results[result.symbol] = result
+        return result
+
+    def fetch_stock_data_result(self, symbol: str) -> MarketDataFetchResult:
+        max_attempts = max(1, self.market_data_retry_count + 1)
+        last_status = ERROR_NO_PRICE_DATA
+        last_message = "No price data found"
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                df, info = self._fetch_live_stock_data_with_timeout(symbol)
+                return self._store_fetch_result(MarketDataFetchResult(
+                    symbol=symbol,
+                    status=STATUS_LIVE_SUCCESS,
+                    message='live provider success',
+                    df=df,
+                    info=info,
+                    attempts=attempt,
+                ))
+            except Exception as exc:
+                last_status = classify_provider_error(exc)
+                last_message = str(exc)
+                print(
+                    f"  [provider-error] symbol={symbol} provider=yfinance "
+                    f"status={last_status} attempt={attempt}/{max_attempts} message={last_message}"
+                )
+
+                if attempt < max_attempts and is_retryable_status(last_status):
+                    if self.market_data_retry_backoff_seconds > 0:
+                        time.sleep(self.market_data_retry_backoff_seconds)
+                    continue
+                break
+
+        fallback_df, cache_age_days = self._load_market_data_fallback(symbol)
+        if fallback_df is not None and cache_age_days is not None:
+            if cache_age_days <= self.market_data_max_age_days:
+                print(
+                    f"  [provider-fallback] symbol={symbol} provider=market_data "
+                    f"status={STATUS_FALLBACK_SUCCESS} cache_age_days={cache_age_days}"
+                )
+                return self._store_fetch_result(MarketDataFetchResult(
+                    symbol=symbol,
+                    provider='market_data',
+                    status=STATUS_FALLBACK_SUCCESS,
+                    message=f'using market_data fallback age={cache_age_days}d',
+                    df=fallback_df,
+                    info={},
+                    attempts=max_attempts,
+                    used_fallback=True,
+                    cache_age_days=cache_age_days,
+                ))
+
+            print(
+                f"  [provider-fallback-rejected] symbol={symbol} provider=market_data "
+                f"status={last_status} cache_age_days={cache_age_days}"
+            )
+            last_message = f"{last_message}; stale fallback age={cache_age_days}d"
+
+        return self._store_fetch_result(MarketDataFetchResult(
+            symbol=symbol,
+            status=last_status,
+            message=last_message,
+            attempts=max_attempts,
+            used_fallback=False,
+            cache_age_days=cache_age_days,
+        ))
+
     def fetch_stock_data(self, symbol: str) -> Tuple[Optional[pd.DataFrame], dict]:
+        result = self.fetch_stock_data_result(symbol)
+        return result.df, result.info
         """
         從 yfinance 獲取一支股票的價格 + 基本面數據
 
@@ -273,7 +435,13 @@ class DailyScreener:
             return None
 
         # --- Yahoo Fallback: 補齊 PEG / ROE ---
-        if not info.get('pegRatio') and not info.get('trailingPegRatio'):
+        fetch_result = self._latest_fetch_results.get(symbol)
+        if (
+            fetch_result
+            and fetch_result.status == STATUS_LIVE_SUCCESS
+            and not info.get('pegRatio')
+            and not info.get('trailingPegRatio')
+        ):
             try:
                 fresh = yf.Ticker(symbol).info or {}
                 for k in ('pegRatio', 'trailingPegRatio', 'returnOnEquity',
@@ -283,7 +451,6 @@ class DailyScreener:
                         info[k] = fresh[k]
             except Exception:
                 pass
-
         target_price = self._normalize_optional_number(info.get('targetMeanPrice'))
         institutional_ownership, insider_sentiment = self._derive_smart_money(info)
 
@@ -399,9 +566,42 @@ class DailyScreener:
         print(f"{'='*70}\n")
 
         results = []
+        summary = {
+            'total_symbols': len(self.symbols),
+            'live_successes': 0,
+            'fallback_successes': 0,
+            'failed_symbols': [],
+            'skipped_symbols': [],
+            'valid_symbols': 0,
+            'coverage_ratio': 0.0,
+            'minimum_coverage_ratio': self.minimum_coverage_ratio,
+            'recommendations_written': False,
+        }
+        self._latest_fetch_results = {}
         for i, symbol in enumerate(self.symbols, 1):
             print(f"[{i}/{len(self.symbols)}] {symbol} ...", end=" ")
             result = self.evaluate_stock(symbol)
+            fetch_result = self._latest_fetch_results.get(symbol)
+            if fetch_result:
+                if fetch_result.status == STATUS_LIVE_SUCCESS:
+                    summary['live_successes'] += 1
+                elif fetch_result.status == STATUS_FALLBACK_SUCCESS:
+                    summary['fallback_successes'] += 1
+                else:
+                    summary['failed_symbols'].append({
+                        'symbol': symbol,
+                        'status': fetch_result.status,
+                        'message': fetch_result.message,
+                    })
+
+                if fetch_result.df is not None and len(fetch_result.df) >= 60:
+                    summary['valid_symbols'] += 1
+                else:
+                    summary['skipped_symbols'].append({
+                        'symbol': symbol,
+                        'status': fetch_result.status,
+                        'message': fetch_result.message,
+                    })
             if result:
                 results.append(result)
                 print(f"✅ score={result['total_score']:.2f} "
@@ -412,6 +612,12 @@ class DailyScreener:
 
             if self.delay > 0 and i < len(self.symbols):
                 time.sleep(self.delay)
+
+        if summary['total_symbols'] > 0:
+            summary['coverage_ratio'] = summary['valid_symbols'] / summary['total_symbols']
+        summary['provider_health_summary'] = build_provider_health_summary(summary)
+        self.last_run_summary = summary
+        print(summary['provider_health_summary'])
 
         if not results:
             print("❌ 無有效結果")
@@ -488,7 +694,31 @@ class DailyScreener:
     # DB 儲存
     # ----------------------------------------------------------
 
-    def save_to_db(self, recommendations: List[Dict], scan_date: date = None):
+    def _can_write_recommendations(self, recommendations: List[Dict]) -> Tuple[bool, str]:
+        summary = self.last_run_summary or {}
+        coverage_ratio = float(summary.get('coverage_ratio', 0.0) or 0.0)
+        minimum_ratio = float(summary.get('minimum_coverage_ratio', self.minimum_coverage_ratio) or 0.0)
+
+        if not recommendations:
+            return False, 'no recommendations generated'
+
+        if coverage_ratio < minimum_ratio:
+            return False, (
+                f'insufficient coverage_ratio={coverage_ratio:.2f} '
+                f'minimum_coverage_ratio={minimum_ratio:.2f}'
+            )
+
+        return True, 'coverage threshold met'
+
+    def _save_to_db_legacy(self, recommendations: List[Dict], scan_date: date = None):
+        can_write, reason = self._can_write_recommendations(recommendations)
+        if not can_write:
+            self.last_run_summary['recommendations_written'] = False
+            self.last_run_summary['write_blocked_reason'] = reason
+            self.last_run_summary['provider_health_summary'] = build_provider_health_summary(self.last_run_summary)
+            print(f"[screener-write-skipped] reason={reason}")
+            print(self.last_run_summary['provider_health_summary'])
+            return False
         """
         將推薦結果寫入 daily_recommendations 表
 
@@ -555,6 +785,12 @@ class DailyScreener:
                 for column_name, definition_sql in missing_columns:
                     self._ensure_column(conn, sql_text, column_name, definition_sql)
                 conn.commit()
+            self.last_run_summary['recommendations_written'] = True
+            self.last_run_summary['write_blocked_reason'] = None
+            self.last_run_summary['provider_health_summary'] = build_provider_health_summary(self.last_run_summary)
+            print(f"[screener-write-complete] recommendations={len(recommendations)} scan_date={scan_date}")
+            print(self.last_run_summary['provider_health_summary'])
+            return True
 
             # 寫入推薦結果 (UPSERT)
             with db.engine.connect() as conn:
@@ -649,6 +885,171 @@ class DailyScreener:
     # ----------------------------------------------------------
     # Line 通知格式化
     # ----------------------------------------------------------
+
+    def save_to_db(self, recommendations: List[Dict], scan_date: date = None):
+        can_write, reason = self._can_write_recommendations(recommendations)
+        if not can_write:
+            self.last_run_summary['recommendations_written'] = False
+            self.last_run_summary['write_blocked_reason'] = reason
+            self.last_run_summary['provider_health_summary'] = build_provider_health_summary(self.last_run_summary)
+            print(f"[screener-write-skipped] reason={reason}")
+            print(self.last_run_summary['provider_health_summary'])
+            return False
+
+        from adapters.database import DatabaseAdapter
+        from sqlalchemy import text as sql_text
+
+        scan_date = scan_date or date.today()
+        db = DatabaseAdapter()
+
+        try:
+            with db.engine.connect() as conn:
+                conn.execute(sql_text("""
+                    CREATE TABLE IF NOT EXISTS daily_recommendations (
+                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                        scan_date DATE NOT NULL,
+                        symbol VARCHAR(10) NOT NULL,
+                        rank_position INT NOT NULL,
+                        signal_type VARCHAR(4) NOT NULL DEFAULT 'BUY',
+                        total_score DECIMAL(4,2) NOT NULL,
+                        breakout_pass TINYINT(1) DEFAULT 0,
+                        acceleration_pass TINYINT(1) DEFAULT 0,
+                        peg_pass TINYINT(1) DEFAULT 0,
+                        dupont_pass TINYINT(1) DEFAULT 0,
+                        ml_confidence DECIMAL(4,3) DEFAULT NULL,
+                        current_price DECIMAL(12,4) NOT NULL,
+                        target_price DECIMAL(12,4),
+                        institutional_ownership DECIMAL(10,4),
+                        insider_sentiment VARCHAR(16) DEFAULT 'NEUTRAL',
+                        support_1 DECIMAL(12,4),
+                        support_2 DECIMAL(12,4),
+                        resistance_1 DECIMAL(12,4),
+                        resistance_2 DECIMAL(12,4),
+                        pe_ratio DECIMAL(10,2),
+                        peg_ratio DECIMAL(10,4),
+                        pb_ratio DECIMAL(10,2),
+                        roe DECIMAL(10,4),
+                        fair_price DECIMAL(12,4),
+                        buy_price DECIMAL(12,4),
+                        sell_price DECIMAL(12,4),
+                        valuation_status VARCHAR(16) DEFAULT 'FAIR',
+                        reason_summary TEXT,
+                        strategy_details JSON,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE KEY uk_date_symbol (scan_date, symbol),
+                        INDEX idx_scan_date (scan_date)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """))
+
+                missing_columns = [
+                    ('target_price', 'target_price DECIMAL(12,4) NULL AFTER current_price'),
+                    ('institutional_ownership', 'institutional_ownership DECIMAL(10,4) NULL AFTER target_price'),
+                    ('insider_sentiment', "insider_sentiment VARCHAR(16) NULL DEFAULT 'NEUTRAL' AFTER institutional_ownership"),
+                    ('fair_price', 'fair_price DECIMAL(12,4) NULL AFTER roe'),
+                    ('buy_price', 'buy_price DECIMAL(12,4) NULL AFTER fair_price'),
+                    ('sell_price', 'sell_price DECIMAL(12,4) NULL AFTER buy_price'),
+                    ('valuation_status', "valuation_status VARCHAR(16) NULL DEFAULT 'FAIR' AFTER sell_price"),
+                    ('reason_summary', 'reason_summary TEXT NULL AFTER valuation_status'),
+                ]
+                for column_name, definition_sql in missing_columns:
+                    self._ensure_column(conn, sql_text, column_name, definition_sql)
+                conn.commit()
+
+            with db.engine.connect() as conn:
+                for rec in recommendations:
+                    safe_float = self._normalize_optional_number
+                    conn.execute(sql_text("""
+                        INSERT INTO daily_recommendations
+                            (scan_date, symbol, rank_position, signal_type, total_score,
+                             breakout_pass, acceleration_pass, peg_pass, dupont_pass,
+                             ml_confidence, current_price, target_price,
+                             institutional_ownership, insider_sentiment,
+                             support_1, support_2, resistance_1, resistance_2,
+                             pe_ratio, peg_ratio, pb_ratio, roe,
+                             fair_price, buy_price, sell_price, valuation_status,
+                             reason_summary, strategy_details)
+                        VALUES
+                            (:scan_date, :symbol, :rank, :signal, :score,
+                             :bp, :ap, :pp, :dp,
+                             :ml, :price, :target_price,
+                             :institutional_ownership, :insider_sentiment,
+                             :s1, :s2, :r1, :r2,
+                             :pe, :peg, :pb, :roe,
+                             :fair_price, :buy_price, :sell_price, :valuation_status,
+                             :reason_summary, :details)
+                        ON DUPLICATE KEY UPDATE
+                            rank_position = VALUES(rank_position),
+                            signal_type = VALUES(signal_type),
+                            total_score = VALUES(total_score),
+                            breakout_pass = VALUES(breakout_pass),
+                            acceleration_pass = VALUES(acceleration_pass),
+                            peg_pass = VALUES(peg_pass),
+                            dupont_pass = VALUES(dupont_pass),
+                            ml_confidence = VALUES(ml_confidence),
+                            current_price = VALUES(current_price),
+                            target_price = VALUES(target_price),
+                            institutional_ownership = VALUES(institutional_ownership),
+                            insider_sentiment = VALUES(insider_sentiment),
+                            support_1 = VALUES(support_1),
+                            support_2 = VALUES(support_2),
+                            resistance_1 = VALUES(resistance_1),
+                            resistance_2 = VALUES(resistance_2),
+                            pe_ratio = VALUES(pe_ratio),
+                            peg_ratio = VALUES(peg_ratio),
+                            pb_ratio = VALUES(pb_ratio),
+                            roe = VALUES(roe),
+                            fair_price = VALUES(fair_price),
+                            buy_price = VALUES(buy_price),
+                            sell_price = VALUES(sell_price),
+                            valuation_status = VALUES(valuation_status),
+                            reason_summary = VALUES(reason_summary),
+                            strategy_details = VALUES(strategy_details)
+                    """), {
+                        'scan_date': str(scan_date),
+                        'symbol': rec['symbol'],
+                        'rank': rec['rank'],
+                        'signal': rec['signal'],
+                        'score': rec['total_score'],
+                        'bp': int(rec['breakout_pass']),
+                        'ap': int(rec['acceleration_pass']),
+                        'pp': int(rec['peg_pass']),
+                        'dp': int(rec['dupont_pass']),
+                        'ml': safe_float(rec.get('ml_confidence')),
+                        'price': safe_float(rec.get('current_price')),
+                        'target_price': safe_float(rec.get('target_price')),
+                        'institutional_ownership': self._normalize_percentage(rec.get('institutional_ownership')),
+                        'insider_sentiment': str(rec.get('insider_sentiment') or 'NEUTRAL').upper(),
+                        's1': safe_float(rec.get('support_1')),
+                        's2': safe_float(rec.get('support_2')),
+                        'r1': safe_float(rec.get('resistance_1')),
+                        'r2': safe_float(rec.get('resistance_2')),
+                        'pe': safe_float(rec.get('pe_ratio')),
+                        'peg': safe_float(rec.get('peg_ratio')),
+                        'pb': safe_float(rec.get('pb_ratio')),
+                        'roe': safe_float(rec.get('roe')),
+                        'fair_price': safe_float(rec.get('fair_price')),
+                        'buy_price': safe_float(rec.get('buy_price')),
+                        'sell_price': safe_float(rec.get('sell_price')),
+                        'valuation_status': str(rec.get('valuation_status') or 'FAIR').upper(),
+                        'reason_summary': str(rec.get('reason_summary') or 'No summary available'),
+                        'details': json.dumps(rec.get('strategy_details', {}), ensure_ascii=False, default=str),
+                    })
+                conn.commit()
+
+            self.last_run_summary['recommendations_written'] = True
+            self.last_run_summary['write_blocked_reason'] = None
+            self.last_run_summary['provider_health_summary'] = build_provider_health_summary(self.last_run_summary)
+            print(f"[screener-write-complete] recommendations={len(recommendations)} scan_date={scan_date}")
+            print(self.last_run_summary['provider_health_summary'])
+            return True
+        except Exception as e:
+            print(f"DB write failed: {e}")
+            self.last_run_summary['recommendations_written'] = False
+            self.last_run_summary['write_blocked_reason'] = str(e)
+            self.last_run_summary['provider_health_summary'] = build_provider_health_summary(self.last_run_summary)
+            return False
+        finally:
+            db.close()
 
     def format_line_message(self, recommendations: List[Dict]) -> str:
         """

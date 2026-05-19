@@ -159,3 +159,50 @@ python strategies/scripts/manual_checks/line_push.py --send
 - `LINEBOT_TROUBLESHOOTING.md`
 - `doc/updatelist.md`
 d
+
+## Production Runtime Notes
+
+### Scheduled screener mode
+
+Use the strategy engine scheduler as the official `daily_recommendations` writer.
+
+- `USE_SCHEDULER=true`
+- `STRATEGY_TYPE=screener`
+- `SCREENER_TOP_N=5`
+- `SCHEDULER_HOUR=16`
+- `SCHEDULER_MINUTE=15`
+
+This keeps the dashboard and LINE recommendation consumers aligned on the latest `scan_date`.
+
+### Unified model path
+
+Set `MODEL_PATH=/app/data/model.pkl` for every service that reads or writes model artifacts.
+
+- `strategy_engine` reads and writes the primary model path through the shared resolver
+- `DailyScreener` auto-detects ML availability from the same resolver
+- `web_dashboard /api/ml_status` reads the same effective path
+- Docker services that need model access should mount `./data:/app/data`
+
+`TEST_MODEL_PATH` is reserved for explicit local or test fallback only.
+
+### Database credential model
+
+Application services should default to `DB_USER=trader`.
+
+- `DB_USER=root` uses `DB_ROOT_PASSWORD` or the `db_root_password` secret
+- non-root app users use `DB_PASSWORD` or the `db_password` secret
+- root credentials are reserved for MySQL initialization, admin tasks, and DB healthchecks
+
+The current `.env` secret hygiene should be reviewed separately; this operational risk is documented but not remediated by this change.
+
+### Trading modes
+
+- `TRADING_MODE=backtest`: generate signals only, do not submit broker orders
+- `TRADING_MODE=paper`: execute through `AlpacaBroker` paper trading
+- `TRADING_MODE=simulation`: execute locally through `MockBroker` only
+
+Simulation mode must never call Alpaca or any real broker API. Notifications and logs should label these executions as `Simulation Trading`.
+
+### Web healthcheck
+
+Production healthchecks should use Python stdlib `urllib` against `http://localhost:6688/health` so the image does not require `curl`.
