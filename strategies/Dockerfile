@@ -1,24 +1,19 @@
-FROM python:3.10-slim
+FROM python:3.11-slim
 
-# Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-# Install system dependencies for numerical computing
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc \
-    g++ \
+    build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy and install Python dependencies
-COPY requirements.txt .
+COPY strategies/requirements.txt /tmp/strategies-requirements.txt
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+    pip install --no-cache-dir -r /tmp/strategies-requirements.txt
 
-# Copy source code
-COPY src/ ./src/
+COPY strategies/ /app/strategies/
+COPY utils/ /app/utils/
 
-# Default command
-CMD ["python", "src/main.py"]
+CMD ["python", "strategies/src/main.py"]

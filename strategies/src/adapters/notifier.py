@@ -11,6 +11,7 @@ Updated: 2026-02-12 - 新增 Flex Message 推薦報告
 """
 
 import json
+import logging
 import sys
 from pathlib import Path
 import requests
@@ -29,14 +30,24 @@ try:
     from utils.line_flex import (
         build_decision_bubble,
         flex_kv,
+        format_currency,
+        sanitize_line_message,
     )
     from utils.security import get_secret
 except ImportError:
     from strategies.src.utils.line_flex import (
         build_decision_bubble,
         flex_kv,
+        format_currency,
+        sanitize_line_message,
     )
     from strategies.src.utils.security import get_secret
+
+
+logger = logging.getLogger(__name__)
+if not logger.handlers:
+    logger.addHandler(logging.StreamHandler())
+logger.setLevel(logging.DEBUG)
 
 
 class LineNotifier:
@@ -59,29 +70,26 @@ class LineNotifier:
         return bool(self.channel_token and self.user_id)
     
     def _send_message(self, messages: list) -> bool:
-        """
-        發送消息到 Line
-        
-        Args:
-            messages: Line 消息對象列表
-            
-        Returns:
-            是否發送成功
-        """
+        """Send one or more LINE messages after payload sanitization."""
         if not self.is_enabled:
-            print("⚠️  Line 通知未啟用，跳過發送")
+            print("Line notifier is not enabled. Skip sending.")
             return False
-        
+
+        sanitized_messages = [sanitize_line_message(message) for message in messages]
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.channel_token}"
         }
-        
+
         payload = {
             "to": self.user_id,
-            "messages": messages
+            "messages": sanitized_messages
         }
-        
+
+        for message in sanitized_messages:
+            if message.get("type") == "flex":
+                logger.debug(json.dumps(message.get("contents", {}), ensure_ascii=False))
+
         try:
             response = requests.post(
                 self.api_url,
@@ -89,18 +97,19 @@ class LineNotifier:
                 json=payload,
                 timeout=10
             )
-            
-            if response.status_code == 200:
-                print(f"✅ Line 通知發送成功")
-                return True
-            else:
-                print(f"❌ Line 通知發送失敗: {response.status_code} - {response.text}")
-                return False
-                
-        except requests.RequestException as e:
-            print(f"❌ Line 通知請求失敗: {str(e)}")
+        except requests.RequestException as error:
+            logger.exception("LINE push request failed with payload=%s", json.dumps(payload, ensure_ascii=False))
+            print(f"Line push request failed: {error}")
             return False
-    
+
+        if response.status_code == 200:
+            print("Line push sent successfully.")
+            return True
+
+        logger.error("LINE push failed payload=%s", json.dumps(payload, ensure_ascii=False))
+        print(f"Line push failed: {response.status_code} - {response.text}")
+        return False
+
     def send_text(self, message: str) -> bool:
         """
         發送純文本消息
@@ -287,11 +296,11 @@ class LineNotifier:
         }
 
     def send_daily_screener_flex(self, top_n_df: pd.DataFrame) -> bool:
-        """推送每日量化 screener 結果；未配置 token 時以 dry-run 成功結束。"""
-        flex_message = self.build_daily_screener_flex(top_n_df)
+        """Push the daily screener Flex payload; dry-run when LINE credentials are missing."""
+        flex_message = sanitize_line_message(self.build_daily_screener_flex(top_n_df))
         if not self.is_enabled:
             preview = json.dumps(flex_message["contents"], ensure_ascii=False)[:400]
-            print("⚠️  Line Token/User ID 未配置，Dry-run 成功，Flex payload 預覽如下:")
+            print("Line token/user id not configured. Dry-run preview:")
             print(preview)
             return True
 
@@ -300,24 +309,37 @@ class LineNotifier:
     def _build_daily_screener_bubble(self, rec: Dict) -> Dict:
         valuation_status = str(rec.get("valuation_status") or "FAIR").upper()
         status_label_map = {
-            "UNDERVALUED": ("🟢 便宜 / UNDERVALUED", "#0B6E4F"),
-            "FAIR": ("🟡 合理 / FAIR", "#A16207"),
-            "OVERVALUED": ("🔴 偏貴 / OVERVALUED", "#B42318"),
+            "UNDERVALUED": ("UNDERVALUED", "#0B6E4F"),
+            "FAIR": ("FAIR", "#A16207"),
+            "PREMIUM_GROWTH": ("FAIR", "#A16207"),
+            "OVERVALUED": ("OVERVALUED", "#B42318"),
         }
         status_text, header_color = status_label_map.get(valuation_status, status_label_map["FAIR"])
 
         xgboost_score = rec.get("xgboost_score")
         buy_price = rec.get("buy_price")
         suggested_allocation_pct = rec.get("suggested_allocation_pct")
-        ai_reason = str(rec.get("ai_reason") or "未提供 AI 摘要")[:60]
+        ai_reason = str(rec.get("ai_reason") or "No AI summary")[:60]
+
+        score_text = "N/A"
+        if xgboost_score is not None and not pd.isna(xgboost_score):
+            score_text = f"{float(xgboost_score):.2f}"
+
+        buy_price_text = format_currency(buy_price)
+        if buy_price_text != "N/A":
+            buy_price_text = f"< {buy_price_text}"
+
+        allocation_text = "N/A"
+        if suggested_allocation_pct is not None and not pd.isna(suggested_allocation_pct):
+            allocation_text = f"{float(suggested_allocation_pct):.1f}%"
 
         body_rows = [
-            flex_kv("AI 勝率", f"{float(xgboost_score):.2f}" if xgboost_score is not None else "N/A"),
-            flex_kv("建議買入價", f"< ${float(buy_price):.2f}" if buy_price is not None else "N/A"),
-            flex_kv("建議資金佔比", f"{float(suggested_allocation_pct):.1f}%" if suggested_allocation_pct is not None else "N/A"),
+            flex_kv("AI Score", score_text),
+            flex_kv("Buy Below", buy_price_text),
+            flex_kv("Allocation", allocation_text),
         ]
 
-        return {
+        return sanitize_line_message({
             "type": "bubble",
             "size": "mega",
             "header": {
@@ -341,12 +363,12 @@ class LineNotifier:
                 "type": "box",
                 "layout": "vertical",
                 "contents": [
-                    {"type": "text", "text": "AI 理由", "size": "xs", "color": "#667085", "weight": "bold"},
+                    {"type": "text", "text": "AI Reason", "size": "xs", "color": "#667085", "weight": "bold"},
                     {"type": "text", "text": ai_reason, "size": "sm", "wrap": True, "color": "#111827", "margin": "sm"},
                 ],
                 "paddingAll": "14px",
             },
-        }
+        })
 
     def _build_stock_bubble(self, rec: Dict) -> Dict:
         """

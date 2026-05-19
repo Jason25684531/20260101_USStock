@@ -44,14 +44,20 @@ app.register_blueprint(line_bot_bp)
 # ============================================
 DB_CONFIG = get_db_config()
 engine = get_engine(DB_CONFIG, echo=False)
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+APP_ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = APP_ROOT.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-STRATEGIES_SRC_ROOT = PROJECT_ROOT / 'strategies' / 'src'
+
+STRATEGIES_SRC_CANDIDATES = (
+    APP_ROOT / 'strategies_src',
+    PROJECT_ROOT / 'strategies' / 'src',
+)
+STRATEGIES_SRC_ROOT = next((path for path in STRATEGIES_SRC_CANDIDATES if path.exists()), STRATEGIES_SRC_CANDIDATES[0])
 if str(STRATEGIES_SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(STRATEGIES_SRC_ROOT))
 
-ONECLICK_BACKTEST_SCRIPT = PROJECT_ROOT / 'strategies' / 'src' / 'main.py'
+ONECLICK_BACKTEST_SCRIPT = STRATEGIES_SRC_ROOT / 'main.py'
 
 
 # Aliases for backward compatibility (previously defined locally)

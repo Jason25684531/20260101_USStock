@@ -423,7 +423,7 @@
                 <tr><th>策略引擎版本</th><td>v2 — 11 策略 Registry + ML</td></tr>
                 <tr><th>ML 模型</th><td id="sysMl">-</td></tr>
                 <tr><th>Universe Sync</th><td id="sysUniverseSync">-</td></tr>
-                <tr><th>Universe 進度</th><td id="sysUniverseProgress">-</td></tr>
+                <tr><th>Universe 進度</th><td><div class="progress" role="progressbar" aria-label="Universe sync progress" aria-valuemin="0" aria-valuemax="100"><div id="sysUniverseProgressBar" class="progress-bar bg-info" style="width:0%" aria-valuenow="0">0.0%</div></div><div id="sysUniverseProgressText" class="small text-muted mt-1">0 / 0 symbols</div></td></tr>
                 <tr><th>Universe 更新時間</th><td id="sysUniverseUpdated">-</td></tr>
             </table>
         </div>
@@ -494,17 +494,24 @@ document.addEventListener('DOMContentLoaded', () => {
     loadRecDates();
     loadRecommendations();
     loadPortfolio();
+    loadPortfolioAnalytics();
     loadBacktestList();
     loadBacktestStatus();
     loadMacro();
     loadSectors();
     loadMLStatus();
     loadSystemInfo();
+    loadUniverseSyncStatus();
     document.getElementById('lastUpdate').textContent = '最後更新: ' + new Date().toLocaleString('zh-TW');
 });
 
 // Auto-refresh
-setInterval(() => { loadRecommendations(); loadPortfolio(); }, 60000);
+setInterval(() => {
+    loadRecommendations();
+    loadPortfolio();
+    loadPortfolioAnalytics();
+    loadUniverseSyncStatus();
+}, 60000);
 setInterval(() => { loadMacro(); loadMLStatus(); }, 120000);
 
 // ============================================
@@ -1421,6 +1428,56 @@ async function loadPortfolioAnalytics() {
         renderCorrelationHeatmap(data.correlation || {});
         if (Array.isArray(data.sector_breakdown) && data.sector_breakdown.length) {
             buildSectorPieFromBreakdown(data.sector_breakdown);
+        }
+    } catch (e) {
+        console.error(e);
+    }
+}
+
+async function loadUniverseSyncStatus() {
+    try {
+        const resp = await fetch('/api/universe/sync-status');
+        const data = await resp.json();
+        syncBackendStatus('universe_sync_status', data, 'Universe sync status unavailable');
+
+        const statusEl = document.getElementById('sysUniverseSync');
+        const progressBar = document.getElementById('sysUniverseProgressBar');
+        const progressText = document.getElementById('sysUniverseProgressText');
+        const updatedEl = document.getElementById('sysUniverseUpdated');
+
+        const status = String(data.status || 'unavailable').toUpperCase();
+        const processed = Number(data.processed_symbols || 0);
+        const total = Number(data.total_symbols || 0);
+        const progressPct = Math.max(0, Math.min(100, Number(data.progress_pct || 0)));
+        const universeCode = data.universe_code || '-';
+        const finishedAt = data.finished_at || '-';
+
+        if (statusEl) {
+            statusEl.textContent = `${status} (${universeCode})`;
+            statusEl.className = status === 'COMPLETED'
+                ? 'positive'
+                : status === 'FAILED' || status === 'PARTIAL_FAILED'
+                    ? 'negative'
+                    : 'text-muted';
+        }
+
+        if (progressBar) {
+            progressBar.style.width = `${progressPct}%`;
+            progressBar.setAttribute('aria-valuenow', String(progressPct));
+            progressBar.textContent = `${progressPct.toFixed(1)}%`;
+            progressBar.className = `progress-bar ${status === 'COMPLETED'
+                ? 'bg-success'
+                : status === 'FAILED' || status === 'PARTIAL_FAILED'
+                    ? 'bg-danger'
+                    : 'bg-info'}`;
+        }
+
+        if (progressText) {
+            progressText.textContent = `${processed} / ${total} symbols`;
+        }
+
+        if (updatedEl) {
+            updatedEl.textContent = finishedAt;
         }
     } catch (e) {
         console.error(e);

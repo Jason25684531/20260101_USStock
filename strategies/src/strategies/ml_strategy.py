@@ -25,10 +25,12 @@ try:
     from strategies.src.config import DB_URI, UNIVERSE_TICKERS, calc_rsi
     from strategies.src.agents import SentimentAgent
     from strategies.src.core.position_sizing import calculate_position_size
+    from strategies.src.policies import GrowthAwarePolicy
 except ModuleNotFoundError:
     from config import DB_URI, UNIVERSE_TICKERS, calc_rsi
     from agents import SentimentAgent
     from core.position_sizing import calculate_position_size
+    from policies import GrowthAwarePolicy
 
 MODEL_MODULE_PATH = Path(__file__).resolve().parents[1] / "ml" / "model.py"
 MODEL_SPEC = importlib.util.spec_from_file_location("usstock_strategy_model", MODEL_MODULE_PATH)
@@ -61,6 +63,7 @@ get_market_regime = MACRO_FILTER_MODULE.get_market_regime
 warnings.filterwarnings("ignore", category=FutureWarning)
 
 ENGINE = create_engine(DB_URI)
+VALUATION_POLICY = GrowthAwarePolicy()
 XGBOOST_RUNTIME = xgb.__version__
 AI_REVIEW_LIMIT = 10
 REQUIRED_PRICE_COLUMNS = {"date", "open", "high", "low", "close", "volume"}
@@ -342,6 +345,17 @@ def _derive_eps_ttm(current_price: float, fundamentals: dict | None) -> float | 
             return float(current_price) / float(pe_value)
 
     return None
+
+
+def _evaluate_growth_aware_valuation(current_price: float, fundamentals: dict | None) -> tuple[float | None, dict]:
+    context = fundamentals or {}
+    eps_ttm = _derive_eps_ttm(current_price, context)
+    valuation = VALUATION_POLICY.evaluate(
+        current_price=current_price,
+        eps_ttm=eps_ttm,
+        revenue_growth_yoy=context.get("revenue_growth_yoy"),
+    )
+    return eps_ttm, valuation
 
 
 def _build_display_frame(results_df: pd.DataFrame, include_ai: bool) -> pd.DataFrame:
@@ -637,8 +651,7 @@ def evaluate_symbol(
     latest_row = features_df.iloc[-1]
     latest_close = round(float(latest_row["close"]), 4)
     fundamentals = (fundamentals_lookup or {}).get(symbol.upper(), {})
-    eps_ttm = _derive_eps_ttm(latest_close, fundamentals)
-    valuation = calculate_valuation_targets(current_price=latest_close, eps_ttm=eps_ttm)
+    eps_ttm, valuation = _evaluate_growth_aware_valuation(latest_close, fundamentals)
     sizing = calculate_position_size(
         total_equity=SCREENING_EQUITY_BASE,
         is_bear_market=market_regime == BEAR_MARKET,

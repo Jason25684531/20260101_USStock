@@ -26,7 +26,8 @@ services:
 
   strategy_engine:
     build:
-      context: ./strategies
+      context: .  # 👈 修改：將 build context 設為專案根目錄
+      dockerfile: strategies/Dockerfile # 👈 指定 Dockerfile 位置
     container_name: usstock_strategy_engine
     restart: always
     depends_on:
@@ -34,26 +35,32 @@ services:
         condition: service_healthy
     env_file: .env
     environment:
+      - PYTHONPATH=/app
       - PYTHONUNBUFFERED=1
       - DB_HOST=db
       - DB_PORT=3306
-      - DB_USER=root
+      - DB_USER=trader
       - DB_NAME=usstock
       - USE_SCHEDULER=true
       - TZ=America/New_York
       - TRADING_MODE=simulation
     volumes:
+      - .:/app
       - ./strategies/src:/app/src
+      - ./strategies/scripts:/app/scripts
+      - ./utils:/app/utils
       - ./data:/app/data
+    working_dir: /app
     ports:
       - "5001:5000"
-    command: ["python", "src/main.py"]
+    command: ["python", "strategies/src/main.py"]
     networks:
       - usstock_network
 
   web_dashboard:
     build:
-      context: ./web
+      context: .
+      dockerfile: web/Dockerfile
     container_name: usstock_web_dashboard
     restart: always
     depends_on:
@@ -69,8 +76,8 @@ services:
       - TZ=America/New_York
       - WEB_PORT=6688
     volumes:
-      - ./web:/app
-      - ./utils:/app/utils
+      - .:/app
+    working_dir: /app/web
     ports:
       - "6688:5000"
     # ... 其餘設定保持不變

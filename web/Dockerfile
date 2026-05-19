@@ -1,26 +1,22 @@
-FROM python:3.10-slim
+FROM python:3.11-slim
 
-# Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
-WORKDIR /app
+WORKDIR /app/web
 
-# Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc \
+    build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy and install Python dependencies
-COPY requirements.txt .
+COPY web/requirements.txt /tmp/web-requirements.txt
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+    pip install --no-cache-dir -r /tmp/web-requirements.txt
 
-# Copy source code
-COPY . .
+COPY web/ /app/web/
+COPY utils/ /app/utils/
+COPY strategies/src/ /app/strategies/src/
 
-# Expose Flask port
 EXPOSE 5000
 
-# Default command using gunicorn
 CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "2", "app:app"]

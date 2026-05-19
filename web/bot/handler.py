@@ -16,6 +16,8 @@ import hashlib
 import hmac
 import base64
 import json
+import logging
+import re
 import threading
 import requests as http_requests
 from pathlib import Path
@@ -23,6 +25,7 @@ from typing import Optional, List
 from datetime import datetime
 from flask import Blueprint, request, abort, jsonify
 from functools import wraps
+from sqlalchemy import text
 
 from security import get_secret
 from db import get_engine, table_exists as _table_exists, column_exists as _column_exists
@@ -33,12 +36,22 @@ _STRATEGIES_SRC_STR = str(_STRATEGIES_SRC)
 if _STRATEGIES_SRC_STR not in sys.path:
     sys.path.insert(0, _STRATEGIES_SRC_STR)
 
+from policies.valuation import GrowthAwarePolicy
+
 try:
     from utils.line_flex import (
         build_decision_bubble as _build_decision_bubble,
+        sanitize_line_message as _sanitize_line_message,
     )  # type: ignore[reportMissingImports]
 except ImportError:
-    _build_decision_bubble = importlib.import_module('utils.line_flex').build_decision_bubble
+    _line_flex_module = importlib.import_module('utils.line_flex')
+    _build_decision_bubble = _line_flex_module.build_decision_bubble
+    _sanitize_line_message = _line_flex_module.sanitize_line_message
+
+logger = logging.getLogger(__name__)
+if not logger.handlers:
+    logger.addHandler(logging.StreamHandler())
+logger.setLevel(logging.DEBUG)
 
 # ============================================
 # Blueprint & Secrets
@@ -69,6 +82,235 @@ def _log_linebot(message):
     except UnicodeEncodeError:
         safe_text = text.encode(encoding, errors='replace').decode(encoding, errors='replace')
         print(safe_text)
+
+
+_TICKER_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9.\-]{0,9}$")
+_VALUATION_POLICY = GrowthAwarePolicy()
+
+
+def _safe_float(value):
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _format_price(value):
+    numeric = _safe_float(value)
+    if numeric is None:
+        return "N/A"
+    return f"${numeric:.2f}"
+
+
+def _format_percent(value):
+    numeric = _safe_float(value)
+    if numeric is None:
+        return "N/A"
+    if abs(numeric) <= 1:
+        numeric *= 100
+    return f"{numeric:.1f}%"
+
+
+def _is_bare_ticker_command(text_value: str) -> bool:
+    stripped = (text_value or "").strip()
+    return bool(_TICKER_PATTERN.fullmatch(stripped))
+
+
+def _derive_eps_ttm(current_price, pe_ratio, forward_pe):
+    price = _safe_float(current_price)
+    pe = _safe_float(pe_ratio)
+    if price and pe and pe > 0:
+        return price / pe
+
+    fpe = _safe_float(forward_pe)
+    if price and fpe and fpe > 0:
+        return price / fpe
+
+    return None
+
+
+def _coerce_strategy_lists(row_mapping):
+    strategy_pairs = [
+        ("Breakout", row_mapping.get("breakout_pass")),
+        ("Acceleration", row_mapping.get("acceleration_pass")),
+        ("PEG", row_mapping.get("peg_pass")),
+        ("DuPont", row_mapping.get("dupont_pass")),
+        ("Institutional", row_mapping.get("institutional_pass")),
+        ("Volume", row_mapping.get("volume_structure_pass")),
+        ("Money Flow", row_mapping.get("money_flow_pass")),
+        ("Multi-TF", row_mapping.get("multi_tf_momentum_pass")),
+        ("Relative Strength", row_mapping.get("relative_strength_pass")),
+        ("Earnings Quality", row_mapping.get("earnings_quality_pass")),
+        ("Sector Rotation", row_mapping.get("sector_rotation_pass")),
+    ]
+    passed = [name for name, flag in strategy_pairs if bool(flag)]
+    failed = [name for name, flag in strategy_pairs if flag is not None and not bool(flag)]
+    return passed, failed
+
+
+def _load_stock_analysis_payload(conn, symbol: str) -> dict | None:
+    recommendation = None
+    if _table_exists(conn, "daily_recommendations"):
+        recommendation = conn.execute(
+            text(
+                """
+                SELECT symbol, scan_date, signal_type, total_score, current_price, ml_confidence,
+                       support_1, resistance_1, macro_regime,
+                       valuation_status, buy_price, sell_price,
+                       breakout_pass, acceleration_pass, peg_pass, dupont_pass,
+                       institutional_pass, volume_structure_pass, money_flow_pass,
+                       multi_tf_momentum_pass, relative_strength_pass,
+                       earnings_quality_pass, sector_rotation_pass
+                FROM daily_recommendations
+                WHERE symbol = :sym
+                ORDER BY scan_date DESC
+                LIMIT 1
+                """
+            ),
+            {"sym": symbol},
+        ).mappings().first()
+
+    registry = None
+    if _table_exists(conn, "symbols_registry"):
+        registry = conn.execute(
+            text(
+                """
+                SELECT symbol, sector
+                FROM symbols_registry
+                WHERE symbol = :sym AND COALESCE(is_active, 0) = 1
+                LIMIT 1
+                """
+            ),
+            {"sym": symbol},
+        ).mappings().first()
+
+    fundamentals = None
+    if _table_exists(conn, "stock_fundamentals"):
+        fundamentals = conn.execute(
+            text(
+                """
+                SELECT symbol, data_date, pe_ratio, forward_pe, peg_ratio, pb_ratio,
+                       revenue_growth_yoy, earnings_growth_yoy, roe, profit_margin, sector
+                FROM stock_fundamentals
+                WHERE symbol = :sym
+                ORDER BY data_date DESC
+                LIMIT 1
+                """
+            ),
+            {"sym": symbol},
+        ).mappings().first()
+
+    latest_price = None
+    if _table_exists(conn, "price_data_v2"):
+        latest_price = conn.execute(
+            text(
+                """
+                SELECT close
+                FROM price_data_v2
+                WHERE symbol = :sym
+                ORDER BY date DESC
+                LIMIT 1
+                """
+            ),
+            {"sym": symbol},
+        ).scalar()
+
+    if recommendation is None and registry is None and fundamentals is None and latest_price is None:
+        return None
+
+    current_price = (
+        _safe_float(recommendation.get("current_price")) if recommendation is not None else None
+    ) or _safe_float(latest_price)
+    pe_ratio = _safe_float(fundamentals.get("pe_ratio")) if fundamentals is not None else None
+    forward_pe = _safe_float(fundamentals.get("forward_pe")) if fundamentals is not None else None
+    revenue_growth = _safe_float(fundamentals.get("revenue_growth_yoy")) if fundamentals is not None else None
+    eps_ttm = _derive_eps_ttm(current_price, pe_ratio, forward_pe)
+    valuation = _VALUATION_POLICY.evaluate(
+        current_price=current_price,
+        eps_ttm=eps_ttm,
+        revenue_growth_yoy=revenue_growth,
+    )
+
+    passed = []
+    failed = []
+    if recommendation is not None:
+        passed, failed = _coerce_strategy_lists(recommendation)
+
+    return {
+        "symbol": symbol,
+        "scan_date": str(recommendation.get("scan_date")) if recommendation is not None and recommendation.get("scan_date") else None,
+        "signal": recommendation.get("signal_type") if recommendation is not None else "WATCH",
+        "total_score": _safe_float(recommendation.get("total_score")) if recommendation is not None else None,
+        "current_price": current_price,
+        "support_1": _safe_float(recommendation.get("support_1")) if recommendation is not None else None,
+        "resistance_1": _safe_float(recommendation.get("resistance_1")) if recommendation is not None else None,
+        "macro_regime": recommendation.get("macro_regime") if recommendation is not None else None,
+        "ml_confidence": _safe_float(recommendation.get("ml_confidence")) if recommendation is not None else None,
+        "fundamentals": {
+            "eps_ttm": eps_ttm,
+            "pe_ratio": pe_ratio,
+            "forward_pe": forward_pe,
+            "peg_ratio": _safe_float(fundamentals.get("peg_ratio")) if fundamentals is not None else None,
+            "pb_ratio": _safe_float(fundamentals.get("pb_ratio")) if fundamentals is not None else None,
+            "roe": _safe_float(fundamentals.get("roe")) if fundamentals is not None else None,
+            "profit_margin": _safe_float(fundamentals.get("profit_margin")) if fundamentals is not None else None,
+            "revenue_growth_yoy": revenue_growth,
+            "sector": (fundamentals.get("sector") if fundamentals is not None else None)
+            or (registry.get("sector") if registry is not None else None),
+        },
+        "valuation": valuation,
+        "strategies_passed": passed,
+        "strategies_failed": failed,
+        "source": "daily_recommendations" if recommendation is not None else "registry_fallback",
+    }
+
+
+def _build_stock_analysis_message(payload: dict) -> str:
+    fundamentals = payload.get("fundamentals") or {}
+    valuation = payload.get("valuation") or _VALUATION_POLICY.evaluate(
+        current_price=payload.get("current_price"),
+        eps_ttm=fundamentals.get("eps_ttm") or _derive_eps_ttm(
+            payload.get("current_price"),
+            fundamentals.get("pe_ratio"),
+            fundamentals.get("forward_pe"),
+        ),
+        revenue_growth_yoy=fundamentals.get("revenue_growth_yoy"),
+    )
+    passed = payload.get("strategies_passed") or []
+    failed = payload.get("strategies_failed") or []
+    total_strategies = len(passed) + len(failed)
+    confidence = _safe_float(payload.get("ml_confidence"))
+    confidence_text = f"{confidence:.0%}" if confidence is not None else "N/A"
+
+    lines = [
+        f"🔎 {payload.get('symbol', 'N/A')} Stock Check",
+        f"Date: {payload.get('scan_date') or 'N/A'} | Signal: {payload.get('signal') or 'WATCH'} | Score: {payload.get('total_score') or 0:.1f}" if payload.get("total_score") is not None else f"Date: {payload.get('scan_date') or 'N/A'} | Signal: {payload.get('signal') or 'WATCH'}",
+        f"Current: {_format_price(payload.get('current_price'))} | Support: {_format_price(payload.get('support_1'))} | Resistance: {_format_price(payload.get('resistance_1'))}",
+        f"Regime: {payload.get('macro_regime') or 'N/A'} | ML Confidence: {confidence_text}",
+        "",
+        f"Valuation: {valuation.get('valuation_status', 'FAIR')}",
+        f"Buy Below: {_format_price(valuation.get('buy_price'))}",
+        f"Fair Price: {_format_price(valuation.get('fair_price'))}",
+        f"Sell Above: {_format_price(valuation.get('sell_price'))}",
+        "",
+        "Fundamentals:",
+        f"PE {fundamentals.get('pe_ratio') if fundamentals.get('pe_ratio') is not None else 'N/A'} | PEG {fundamentals.get('peg_ratio') if fundamentals.get('peg_ratio') is not None else 'N/A'} | PB {fundamentals.get('pb_ratio') if fundamentals.get('pb_ratio') is not None else 'N/A'}",
+        f"Revenue Growth: {_format_percent(fundamentals.get('revenue_growth_yoy'))} | ROE: {_format_percent(fundamentals.get('roe'))} | Margin: {_format_percent(fundamentals.get('profit_margin'))}",
+        f"Sector: {fundamentals.get('sector') or 'N/A'}",
+    ]
+
+    if total_strategies:
+        lines.extend(
+            [
+                "",
+                f"Strategies Passed ({len(passed)}/{total_strategies}): {', '.join(passed) if passed else 'None'}",
+                f"Strategies Failed: {', '.join(failed) if failed else 'None'}",
+            ]
+        )
+
+    return "\n".join(lines)
 
 
 INSTITUTIONAL_FLOW_TABLE_CANDIDATES = (
@@ -479,11 +721,10 @@ def callback():
 
         return jsonify({'status': 'ok'}), 200
 
-    except Exception as e:
-        _log_linebot(f"❌ Webhook 處理錯誤: {type(e).__name__}: {e}")
-        import traceback
-        traceback.print_exc()
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+    except Exception as error:
+        logger.exception("Webhook callback failed")
+        _log_linebot(f"Webhook callback failed: {type(error).__name__}: {error}")
+        return jsonify({'status': 'error', 'message': str(error)}), 500
 
 
 # ============================================
@@ -547,7 +788,10 @@ def process_command(text: str, user_id: Optional[str] = None) -> Optional[List[d
         return _cmd_web()
 
     # --- Top5 / scan 命令 ---
-    if cmd in ('top5', 'top 5', '推薦', '/top5', '/scan'):
+    if cmd in ('top5', 'top 5', '推薦', '/top5'):
+        return _cmd_top5()
+
+    if cmd == '/scan':
         if user_id and user_id != 'unknown':
             return _cmd_top5_realtime(user_id)
         return _cmd_top5()
@@ -569,6 +813,9 @@ def process_command(text: str, user_id: Optional[str] = None) -> Optional[List[d
         if len(parts) >= 2:
             return _cmd_stock(parts[1].upper())
         return [_text_msg("請指定股票代碼，例如: /stock AAPL")]
+
+    if _is_bare_ticker_command(text):
+        return _cmd_stock(text.strip().upper())
 
     # --- /market: 宏觀環境 ---
     if cmd in ('/market', '市場', '宏觀', '/macro'):
@@ -657,81 +904,20 @@ def _cmd_top5_realtime(user_id: str) -> List[dict]:
 # /stock SYMBOL: 個股 11 策略分析
 # ============================================
 def _cmd_stock(symbol: str) -> List[dict]:
-    """查詢個股的 11 策略通過/不通過 + 基本面 + ML"""
+    """Return DB-backed stock analysis with growth-aware valuation output."""
     try:
-        from sqlalchemy import text as sql_text
         engine = _get_db_engine()
-
         with engine.connect() as conn:
-            row = conn.execute(sql_text("""
-                SELECT symbol, scan_date, signal_type, total_score,
-                       current_price, ml_confidence,
-                       breakout_pass, acceleration_pass, peg_pass, dupont_pass,
-                       institutional_pass, volume_structure_pass, money_flow_pass,
-                       multi_tf_momentum_pass, relative_strength_pass,
-                       earnings_quality_pass, sector_rotation_pass,
-                       total_strategies, support_1, resistance_1, macro_regime
-                FROM daily_recommendations
-                WHERE symbol = :sym
-                ORDER BY scan_date DESC LIMIT 1
-            """), {'sym': symbol}).first()
+            payload = _load_stock_analysis_payload(conn, symbol)
 
-            if not row:
-                return [_text_msg(f"❌ 找不到 {symbol} 的推薦資料")]
+        if not payload:
+            return [_text_msg(f"??? {symbol} ?????????????")]
 
-            strat_names = [
-                ('突破', row[6]), ('加速', row[7]), ('PEG', row[8]), ('杜邦', row[9]),
-                ('籌碼', row[10]), ('量價', row[11]), ('資金流', row[12]),
-                ('多TF', row[13]), ('RS', row[14]), ('盈餘', row[15]), ('產業', row[16]),
-            ]
-            passed = [name for name, v in strat_names if v]
-            failed = [name for name, v in strat_names if not v]
-            total = row[17] or len(strat_names)
-            ml_conf = float(row[5]) if row[5] else 0
-            ml_str = f"{ml_conf:.0%}" if ml_conf > 0 else "—"
-            s1 = f"${float(row[18]):.2f}" if row[18] else "N/A"
-            r1 = f"${float(row[19]):.2f}" if row[19] else "N/A"
-            regime = row[20] or "N/A"
-
-            msg = (
-                f"🔍 {row[0]} 詳細分析\n"
-                f"📅 {row[1]} | {row[2]} | 評分 {float(row[3]):.1f}\n"
-                f"💰 ${float(row[4]):.2f} | 支撐 {s1} | 壓力 {r1}\n"
-                f"🌍 Regime: {regime}\n\n"
-                f"✅ 通過 ({len(passed)}/{total}):\n"
-                f"  {' | '.join(passed) if passed else '無'}\n\n"
-                f"❌ 未通過:\n"
-                f"  {' | '.join(failed) if failed else '全通過 🎉'}\n\n"
-                f"🤖 ML 信心度: {ml_str}"
-            )
-
-            # 查基本面
-            fund_row = conn.execute(sql_text("""
-                SELECT pe_ratio, peg_ratio, pb_ratio, roe, profit_margin, sector
-                FROM stock_fundamentals
-                WHERE symbol = :sym
-                ORDER BY updated_at DESC LIMIT 1
-            """), {'sym': symbol}).first()
-
-            if fund_row:
-                pe = f"{float(fund_row[0]):.1f}" if fund_row[0] else "-"
-                peg = f"{float(fund_row[1]):.2f}" if fund_row[1] else "-"
-                pb = f"{float(fund_row[2]):.1f}" if fund_row[2] else "-"
-                roe = f"{float(fund_row[3])*100:.1f}%" if fund_row[3] else "-"
-                margin = f"{float(fund_row[4])*100:.1f}%" if fund_row[4] else "-"
-                sector = fund_row[5] or "-"
-                msg += (
-                    f"\n\n📈 基本面:\n"
-                    f"  PE {pe} | PEG {peg} | PB {pb}\n"
-                    f"  ROE {roe} | 淨利率 {margin}\n"
-                    f"  產業: {sector}"
-                )
-
-            return [_text_msg(msg)]
-
-    except Exception as e:
-        _log_linebot(f"❌ /stock 查詢失敗: {e}")
-        return [_text_msg(f"❌ 查詢 {symbol} 失敗: {e}")]
+        return [_text_msg(_build_stock_analysis_message(payload))]
+    except Exception as error:
+        logger.exception("Stock lookup failed for %s", symbol)
+        _log_linebot(f"/stock lookup failed for {symbol}: {error}")
+        return [_text_msg(f"?? {symbol} ??: {error}")]
 
 
 # ============================================
@@ -1301,16 +1487,20 @@ def _text_msg(s: str) -> dict:
 
 
 def reply_messages(reply_token: str, messages: List[dict]):
-    """
-    回覆消息（支援 text + flex）
-
-    Args:
-        reply_token: Line 回覆令牌
-        messages: LINE message object 列表
-    """
+    """Reply to LINE messages with sanitized payloads."""
     if not CHANNEL_TOKEN:
-        _log_linebot("⚠️  Channel Token 未配置，無法回覆消息")
+        _log_linebot("Channel token not configured; cannot reply.")
         return
+
+    safe_messages = [_sanitize_line_message(message) for message in messages[:5]]
+    for message in safe_messages:
+        if message.get("type") == "flex":
+            logger.debug(json.dumps(message.get("contents", {}), ensure_ascii=False))
+
+    payload = {
+        "replyToken": reply_token,
+        "messages": safe_messages,
+    }
 
     try:
         resp = http_requests.post(
@@ -1319,25 +1509,34 @@ def reply_messages(reply_token: str, messages: List[dict]):
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {CHANNEL_TOKEN}",
             },
-            json={
-                "replyToken": reply_token,
-                "messages": messages[:5],  # LINE 每次回覆最多 5 則
-            },
+            json=payload,
             timeout=10,
         )
         if resp.status_code == 200:
-            _log_linebot("✅ 消息回覆成功")
+            _log_linebot("Reply sent successfully")
         else:
-            _log_linebot(f"❌ 消息回覆失敗: {resp.status_code} - {resp.text}")
-    except Exception as e:
-        _log_linebot(f"❌ 回覆請求失敗: {e}")
+            logger.error("LINE reply failed payload=%s", json.dumps(payload, ensure_ascii=False))
+            _log_linebot(f"Reply failed: {resp.status_code} - {resp.text}")
+    except Exception as error:
+        logger.exception("LINE reply request failed payload=%s", json.dumps(payload, ensure_ascii=False))
+        _log_linebot(f"Reply request failed: {error}")
 
 
 def push_message(user_id: str, messages: List[dict]) -> bool:
-    """主動推播消息給指定 LINE 使用者。"""
+    """Push sanitized LINE messages to a user."""
     if not CHANNEL_TOKEN:
-        _log_linebot("⚠️  Channel Token 未配置，無法主動推播")
+        _log_linebot("Channel token not configured; cannot push.")
         return False
+
+    safe_messages = [_sanitize_line_message(message) for message in messages[:5]]
+    for message in safe_messages:
+        if message.get("type") == "flex":
+            logger.debug(json.dumps(message.get("contents", {}), ensure_ascii=False))
+
+    payload = {
+        "to": user_id,
+        "messages": safe_messages,
+    }
 
     try:
         resp = http_requests.post(
@@ -1346,19 +1545,18 @@ def push_message(user_id: str, messages: List[dict]) -> bool:
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {CHANNEL_TOKEN}",
             },
-            json={
-                "to": user_id,
-                "messages": messages[:5],
-            },
+            json=payload,
             timeout=15,
         )
         if resp.status_code == 200:
-            _log_linebot(f"✅ Push 成功: {user_id}")
+            _log_linebot(f"Push sent successfully: {user_id}")
             return True
 
-        _log_linebot(f"❌ Push 失敗: {resp.status_code} - {resp.text}")
-    except Exception as e:
-        _log_linebot(f"❌ Push 請求失敗: {e}")
+        logger.error("LINE push failed payload=%s", json.dumps(payload, ensure_ascii=False))
+        _log_linebot(f"Push failed: {resp.status_code} - {resp.text}")
+    except Exception as error:
+        logger.exception("LINE push request failed payload=%s", json.dumps(payload, ensure_ascii=False))
+        _log_linebot(f"Push request failed: {error}")
 
     return False
 
@@ -1378,9 +1576,10 @@ def _run_screener_and_push(user_id: str):
         screener.save_to_db(recommendations)
         flex = _build_top5_flex(recommendations, datetime.now().strftime('%Y-%m-%d'))
         push_message(user_id, [flex])
-    except Exception as e:
-        _log_linebot(f"❌ 背景 Top5 掃描失敗: {type(e).__name__}: {e}")
-        push_message(user_id, [_text_msg(f"❌ 最新掃描失敗: {e}")])
+    except Exception as error:
+        logger.exception("Background Top5 scan failed for user %s", user_id)
+        _log_linebot(f"Background Top5 scan failed: {type(error).__name__}: {error}")
+        push_message(user_id, [_text_msg(f"❌ 最新掃描失敗: {error}")])
 
 
 # ============================================

@@ -14,8 +14,8 @@ xgboost>=2.0.0
 SQLAlchemy==2.0.20
 mysql-connector-python==8.1.0
 
-# Trade Execution (Optional - only for real Alpaca integration)
-alpaca-trade-api==3.0.2
+# Trade Execution (Optional - install separately when Alpaca paper trading is enabled)
+# alpaca-trade-api==3.0.2
 
 # Market Data & Macro
 fredapi>=0.5.0
@@ -28,6 +28,7 @@ pytz==2023.3
 # Notifications
 requests>=2.31.0
 google-genai>=1.0.0
+websockets>=13.0.0,<15.0.0
 
 # Utilities
 python-dotenv==1.0.0

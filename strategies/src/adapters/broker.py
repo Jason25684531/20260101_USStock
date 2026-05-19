@@ -57,7 +57,15 @@ class AlpacaBroker:
             ValueError: If use_paper is False (safety check).
             ConnectionError: If unable to connect to Alpaca API.
         """
-        import alpaca_trade_api as tradeapi
+        try:
+            import alpaca_trade_api as tradeapi_module
+        except ImportError as e:
+            raise ConnectionError(
+                "alpaca-trade-api is not installed. Install the optional Alpaca dependency "
+                "before enabling paper trading."
+            ) from e
+
+        self._tradeapi = tradeapi_module
         
         if not use_paper:
             raise ValueError(
@@ -77,8 +85,7 @@ class AlpacaBroker:
         
         # Initialize Alpaca API client
         try:
-            import alpaca_trade_api as tradeapi
-            self.api = tradeapi.REST(
+            self.api = self._tradeapi.REST(
                 key_id=api_key,
                 secret_key=api_secret,
                 base_url=self.PAPER_BASE_URL,
@@ -147,7 +154,7 @@ class AlpacaBroker:
         try:
             position = self.api.get_position(symbol)
             return int(position.qty)
-        except tradeapi.rest.APIError as e:
+        except self._tradeapi.rest.APIError as e:
             # Position not found is not an error
             if 'position does not exist' in str(e).lower():
                 return 0

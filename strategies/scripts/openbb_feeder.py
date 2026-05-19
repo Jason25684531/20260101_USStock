@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+from io import StringIO
 from pathlib import Path
 
 import pandas as pd
@@ -19,7 +20,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from strategies.src.adapters.institutional_activity import fetch_and_store_institutional_activity
-from strategies.src.config import DB_URI, NEWS_LIMIT, NEWS_PROVIDER, OPENBB_API_URL, UNIVERSE_TICKERS
+from strategies.src.config import DB_URI, DEFAULT_SYMBOLS, NEWS_LIMIT, NEWS_PROVIDER, OPENBB_API_URL
 from strategies.src.symbol_registry import (
     DEFAULT_BENCHMARK_SYMBOLS,
     deactivate_missing_memberships,
@@ -33,7 +34,7 @@ from strategies.src.symbol_registry import (
 )
 
 engine = create_engine(DB_URI)
-DEFAULT_FEED_SYMBOLS = tuple(sorted({symbol.upper() for symbol in UNIVERSE_TICKERS} | {"SPY"}))
+DEFAULT_FEED_SYMBOLS = tuple(sorted({symbol.upper() for symbol in DEFAULT_SYMBOLS} | {"SPY"}))
 INDEX_SYNC_MAP = {
     "SP500": {"provider_symbol": "sp500", "provider": "fmp", "membership_type": "index"},
 }
@@ -196,6 +197,47 @@ def _fetch_index_constituents_from_openbb(index_code: str) -> list[dict]:
     return records
 
 
+def _fetch_sp500_constituents_from_wikipedia() -> list[dict]:
+    response = requests.get(
+        "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
+        headers={"User-Agent": "Mozilla/5.0 (compatible; USStockRegistrySync/1.0)"},
+        timeout=45,
+    )
+    response.raise_for_status()
+    tables = pd.read_html(StringIO(response.text))
+    if not tables:
+        raise ValueError("Wikipedia did not return any S&P 500 tables")
+
+    df = tables[0]
+    if "Symbol" not in df.columns:
+        raise ValueError("Wikipedia S&P 500 table is missing the Symbol column")
+
+    records: list[dict] = []
+    for row in df.to_dict(orient="records"):
+        symbol = normalize_symbol(row.get("Symbol"))
+        if not symbol:
+            continue
+        records.append(
+            {
+                "symbol": symbol,
+                "asset_type": "EQUITY",
+                "sector": row.get("GICS Sector"),
+            }
+        )
+    if not records:
+        raise ValueError("Wikipedia S&P 500 table returned no usable symbols")
+    return records
+
+
+def _fetch_index_constituents(index_code: str) -> list[dict]:
+    try:
+        return _fetch_index_constituents_from_openbb(index_code)
+    except Exception:
+        if index_code.upper() == "SP500":
+            return _fetch_sp500_constituents_from_wikipedia()
+        raise
+
+
 def _normalize_constituents(records: list[dict]) -> list[dict]:
     normalized: list[dict] = []
     seen: set[str] = set()
@@ -218,7 +260,7 @@ def sync_from_indices(index_codes: list[str] | None = None, batch_size: int = 20
         processed = 0
         errors: list[str] = []
         try:
-            raw_records = _fetch_index_constituents_from_openbb(index_code)
+            raw_records = _fetch_index_constituents(index_code)
             constituents = _normalize_constituents(raw_records)
         except Exception as error:
             summaries[index_code] = {
@@ -349,21 +391,28 @@ def _load_symbols_for_default_feed() -> list[str]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="OpenBB / yfinance data feeder")
-    parser.add_argument("--symbols", type=str, default=None, help="股票代碼，逗號分隔；未指定則使用 registry active pool")
-    parser.add_argument("--skip-news", action="store_true", help="略過公司新聞同步")
-    parser.add_argument("--skip-institutional", action="store_true", help="略過機構與內部人籌碼同步")
-    parser.add_argument("--skip-index-sync", action="store_true", help="略過指數成分股同步")
-    parser.add_argument("--sync-indices", type=str, default="SP500", help="要同步的指數代碼，逗號分隔")
-    parser.add_argument("--sleep", type=float, default=1.0, help="每檔股票之間的等待秒數")
+    parser.add_argument("--symbols", type=str, default=None, help="Comma-separated symbols; defaults to registry active pool")
+    parser.add_argument("--skip-news", action="store_true", help="Skip company news ingestion")
+    parser.add_argument("--skip-institutional", action="store_true", help="Skip institutional activity ingestion")
+    parser.add_argument("--skip-index-sync", action="store_true", help="Skip universe registry index sync")
+    parser.add_argument("--sync", action="store_true", help="Sync registry only and exit")
+    parser.add_argument("--sync-indices", type=str, default="SP500", help="Comma-separated index codes to sync")
+    parser.add_argument("--sleep", type=float, default=1.0, help="Sleep seconds between symbols")
     args = parser.parse_args()
+
+    sync_codes = [value.strip().upper() for value in str(args.sync_indices or "").split(",") if value.strip()]
+
+    if args.sync:
+        sync_result = sync_from_indices(index_codes=sync_codes or ["SP500"])
+        print(f"Universe Registry sync result: {sync_result}")
+        return 0
 
     if not args.skip_index_sync:
         try:
-            sync_codes = [value.strip().upper() for value in str(args.sync_indices or "").split(",") if value.strip()]
             sync_result = sync_from_indices(index_codes=sync_codes or ["SP500"])
-            print(f"Universe Registry 同步結果: {sync_result}")
+            print(f"Universe Registry sync result: {sync_result}")
         except Exception as error:
-            print(f"Universe Registry 同步失敗，改用 fallback 股票池: {error}")
+            print(f"Universe Registry sync failed, continuing with fallback symbol pool: {error}")
 
     if args.symbols:
         symbols = [symbol.strip().upper() for symbol in args.symbols.split(",") if symbol.strip()]
@@ -373,8 +422,8 @@ def main() -> int:
     if "SPY" not in symbols:
         symbols.append("SPY")
 
-    print("開始執行 OpenBB Data Feeder")
-    print(f"股票池共 {len(symbols)} 檔")
+    print("Starting OpenBB Data Feeder")
+    print(f"Feeding {len(symbols)} symbols")
 
     for index, ticker in enumerate(symbols):
         fetch_and_store_price(ticker)
@@ -385,7 +434,7 @@ def main() -> int:
         if index < len(symbols) - 1 and args.sleep > 0:
             time.sleep(args.sleep)
 
-    print("Data Feeder 執行完成")
+    print("Data Feeder completed")
     return 0
 
 

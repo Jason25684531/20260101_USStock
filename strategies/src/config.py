@@ -21,7 +21,7 @@ OPENBB_API_URL = os.getenv("OPENBB_API_URL", "http://127.0.0.1:6900")
 # 指向你的 MySQL 資料庫中樞
 DB_URI = os.getenv(
     "DATABASE_URL",
-    "mysql+pymysql://{user}:{password}@{host}:{port}/{database}".format(
+    "mysql+mysqlconnector://{user}:{password}@{host}:{port}/{database}".format(
         user=os.getenv("DB_USER", os.getenv("MYSQL_USER", "trader")),
         password=os.getenv("DB_PASSWORD", ""),
         host=os.getenv("DB_HOST", "127.0.0.1"),
