@@ -4,10 +4,17 @@ from datetime import date
 from typing import Any
 
 import pandas as pd
-import yfinance as yf
 from sqlalchemy import create_engine, text
 
-from strategies.src.config import DB_URI, UNIVERSE_TICKERS
+try:
+    from strategies.src.config import DB_URI, UNIVERSE_TICKERS
+except ModuleNotFoundError:
+    from config import DB_URI, UNIVERSE_TICKERS
+
+try:
+    import yfinance as yf
+except ImportError:
+    yf = None
 
 ACTIVITY_SOURCE = 'yfinance-holders'
 DEFAULT_ACTIVITY_SYMBOLS = tuple(sorted({symbol.upper() for symbol in UNIVERSE_TICKERS} | {'SPY'}))
@@ -99,6 +106,9 @@ def _prepare_insider_metrics(df: pd.DataFrame | None) -> dict[str, Any]:
 
 
 def build_institutional_activity_snapshot(symbol: str) -> dict[str, Any]:
+    if yf is None:
+        return {}
+
     ticker = yf.Ticker(symbol.upper())
 
     try:

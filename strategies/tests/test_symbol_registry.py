@@ -25,6 +25,77 @@ def _bootstrap_registry_schema(engine) -> None:
         """))
 
 
+def test_registry_enrichment_columns_are_added_without_losing_rows():
+    from symbol_registry import ensure_registry_enrichment_columns
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    _bootstrap_registry_schema(engine)
+
+    with engine.begin() as conn:
+        conn.execute(
+            text("""
+                INSERT INTO symbols_registry(symbol, asset_type, sector, is_active, is_benchmark)
+                VALUES ('AAPL', 'EQUITY', 'Technology', 1, 0)
+            """)
+        )
+        ensure_registry_enrichment_columns(conn)
+
+        columns = {
+            row[1]
+            for row in conn.execute(text("PRAGMA table_info(symbols_registry)")).all()
+        }
+        row = conn.execute(
+            text("SELECT symbol, is_active FROM symbols_registry WHERE symbol = 'AAPL'")
+        ).one()
+
+    assert {
+        "whale_held_pct",
+        "inst_count",
+        "institutional_net_buy",
+        "sentiment_score",
+    }.issubset(columns)
+    assert row.symbol == "AAPL"
+    assert row.is_active == 1
+
+
+def test_upsert_symbol_enrichment_sanitizes_partial_payload():
+    from symbol_registry import ensure_registry_enrichment_columns, upsert_symbol_enrichment
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    _bootstrap_registry_schema(engine)
+
+    with engine.begin() as conn:
+        conn.execute(
+            text("""
+                INSERT INTO symbols_registry(symbol, asset_type, sector, is_active, is_benchmark)
+                VALUES ('NVDA', 'EQUITY', 'Technology', 1, 0)
+            """)
+        )
+        ensure_registry_enrichment_columns(conn)
+        upsert_symbol_enrichment(
+            conn,
+            "NVDA",
+            {
+                "whale_held_pct": "nan",
+                "inst_count": "42",
+                "institutional_net_buy": "-1234.7",
+                "sentiment_score": "3.5",
+            },
+        )
+        row = conn.execute(
+            text("""
+                SELECT whale_held_pct, inst_count, institutional_net_buy, sentiment_score
+                FROM symbols_registry
+                WHERE symbol = 'NVDA'
+            """)
+        ).one()
+
+    assert row.whale_held_pct is None
+    assert row.inst_count == 42
+    assert row.institutional_net_buy == -1234.7
+    assert row.sentiment_score == 1.0
+
+
 def test_load_active_symbols_prefers_registry_entries():
     from symbol_registry import load_active_symbols
 

@@ -6,12 +6,15 @@
 import os
 import sys
 import time
+import random
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Dict, Optional
 import pandas as pd
-import yfinance as yf
-from fredapi import Fred
+try:
+    from fredapi import Fred
+except ImportError:
+    Fred = None
 from dotenv import load_dotenv
 
 # 加載 .env 文件（從項目根目錄）
@@ -21,7 +24,66 @@ load_dotenv(dotenv_path=env_path)
 # 添加父目錄到路徑
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from adapters.database import DatabaseAdapter
+from symbol_registry import dedupe_symbols, load_active_symbols
 from utils.security import get_secret
+
+
+def chunked(items: List[str], batch_size: int = 20) -> List[List[str]]:
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+    return [items[index:index + batch_size] for index in range(0, len(items), batch_size)]
+
+
+def resolve_ingestion_symbols(
+    db: DatabaseAdapter,
+    fallback_symbols: List[str],
+    env_var: str = "SYMBOLS",
+) -> tuple[List[str], str]:
+    override = os.getenv(env_var)
+    if override:
+        return dedupe_symbols(override.split(",")), "override"
+
+    try:
+        engine = getattr(db, "engine", None)
+        if engine is None and hasattr(db, "db"):
+            engine = getattr(db.db, "engine", None)
+        if engine is None:
+            raise AttributeError(f"{type(db).__name__} has no database engine reference")
+
+        symbols = load_active_symbols(
+            engine,
+            fallback_symbols=fallback_symbols,
+            include_benchmarks=False,
+        )
+        if symbols:
+            return symbols, "registry"
+    except Exception as exc:
+        print(f"WARNING: failed to load symbols_registry active universe; using fallback: {exc}")
+
+    return dedupe_symbols(fallback_symbols), "fallback"
+
+
+def fetch_yahoo_prices_in_batches(
+    ingestion: "DataIngestion",
+    symbols: List[str],
+    start_date: str = None,
+    end_date: str = None,
+    batch_size: int = 20,
+    min_batch_sleep: float = 20.0,
+    max_batch_sleep: float = 40.0,
+) -> Dict[str, pd.DataFrame]:
+    results: Dict[str, pd.DataFrame] = {}
+    batches = chunked(dedupe_symbols(symbols), batch_size=batch_size)
+
+    for batch_index, batch in enumerate(batches, 1):
+        print(f"\nBatch {batch_index}/{len(batches)}: fetching {len(batch)} symbols")
+        results.update(ingestion.fetch_yahoo_prices(batch, start_date, end_date))
+        if batch_index < len(batches):
+            sleep_seconds = random.uniform(min_batch_sleep, max_batch_sleep)
+            print(f"Sleeping {sleep_seconds:.1f}s between batches")
+            time.sleep(sleep_seconds)
+
+    return results
 
 
 class DataIngestion:
@@ -34,6 +96,8 @@ class DataIngestion:
         # 設置 FRED API
         fred_api_key = os.getenv('FRED_API_KEY', 'dummy_key')
         try:
+            if Fred is None:
+                raise ImportError("fredapi is not installed")
             self.fred = Fred(api_key=fred_api_key)
             # 測試連接
             self.fred.get_series('UNRATE', observation_start='2024-01-01', observation_end='2024-01-31')
@@ -79,6 +143,7 @@ class DataIngestion:
                 print(f"\n[{i}/{len(symbols)}] 獲取 {symbol} 的價格數據...")
                 
                 # 使用 yfinance 獲取數據
+                import yfinance as yf
                 ticker = yf.Ticker(symbol)
                 df = ticker.history(start=start_date, end=end_date)
                 
@@ -128,6 +193,7 @@ class DataIngestion:
             try:
                 print(f"\n[{i}/{len(symbols)}] 獲取 {symbol} 的基本面數據...")
                 
+                import yfinance as yf
                 ticker = yf.Ticker(symbol)
                 info = ticker.info
                 
@@ -295,8 +361,11 @@ def main():
     
     # 定義目標股票列表（由 config.DEFAULT_SYMBOLS 統一管理）
     from config import DEFAULT_SYMBOLS
-    default_list = ','.join(DEFAULT_SYMBOLS)
-    symbols = os.getenv('SYMBOLS', default_list).split(',')
+    symbols, symbol_source = resolve_ingestion_symbols(
+        ingestion,
+        fallback_symbols=list(DEFAULT_SYMBOLS),
+    )
+    print(f"Symbol universe source: {symbol_source}; count={len(symbols)}")
     
     # 設置日期範圍（可以通過環境變量自定義）
     start_date = os.getenv('START_DATE', None)  # 默認為5年前
@@ -307,7 +376,7 @@ def main():
         print("\n" + "=" * 70)
         print(" 步驟 1: 獲取股票價格數據")
         print("=" * 70)
-        prices = ingestion.fetch_yahoo_prices(symbols, start_date, end_date)
+        prices = fetch_yahoo_prices_in_batches(ingestion, symbols, start_date, end_date)
         
         # 2. 獲取基本面數據
         print("\n" + "=" * 70)

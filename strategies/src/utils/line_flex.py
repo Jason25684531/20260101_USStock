@@ -26,8 +26,17 @@ STATUS_STYLE_MAP = {
 def _safe_text(value: Any, fallback: str = "N/A") -> str:
     if value is None:
         return fallback
+    try:
+        if pd.isna(value):
+            return fallback
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, (int, float)) and not pd.notna(value):
+        return fallback
     text = str(value).strip()
-    return text or fallback
+    if text.lower() in {"nan", "inf", "-inf", "infinity", "-infinity"}:
+        return fallback
+    return (text[:237] + "...") if len(text) > 240 else (text or fallback)
 
 
 def _safe_color(value: Any, fallback: str) -> str:
@@ -132,6 +141,48 @@ def format_institutional_ownership(value) -> str:
         return f"{numeric:.1f}%"
     except (TypeError, ValueError):
         return "N/A"
+
+
+def _safe_number(value) -> float | None:
+    try:
+        if value is None or pd.isna(value):
+            return None
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if numeric in (float("inf"), float("-inf")):
+        return None
+    return numeric
+
+
+def format_holder_count(value) -> str:
+    numeric = _safe_number(value)
+    if numeric is None or numeric < 0:
+        return "N/A"
+    return str(int(round(numeric)))
+
+
+def format_signed_score(value) -> str:
+    numeric = _safe_number(value)
+    if numeric is None:
+        return "N/A"
+    return f"{numeric:.2f}"
+
+
+def format_sentiment_score(value) -> str:
+    numeric = _safe_number(value)
+    if numeric is None:
+        return "N/A"
+    numeric = max(-1.0, min(1.0, numeric))
+    return f"{numeric:+.2f}"
+
+
+def format_whale_holder_pair(rec: Mapping) -> str:
+    return f"{format_institutional_ownership(rec.get('whale_held_pct'))} / {format_holder_count(rec.get('inst_count'))}"
+
+
+def format_net_sentiment_pair(rec: Mapping) -> str:
+    return f"{format_signed_score(rec.get('institutional_net_buy'))} / {format_sentiment_score(rec.get('sentiment_score'))}"
 
 
 def format_insider_sentiment(value) -> str:
@@ -254,6 +305,8 @@ def build_decision_bubble(rec: Mapping) -> dict:
                 flex_kv("Sell Above", format_price_bound(rec.get("sell_price"), ">")),
                 flex_section_title("Smart Money / AI"),
                 flex_kv("Institutional / Insider", format_smart_money_pair(rec)),
+                flex_kv("Whale / Holders", format_whale_holder_pair(rec)),
+                flex_kv("Net Buy / Sentiment", format_net_sentiment_pair(rec)),
                 flex_kv("Trend", format_smart_money_trend(rec)),
                 flex_kv("Today Flow", format_today_flow(rec)),
                 flex_kv("ML Confidence", format_ml_confidence(rec.get("ml_confidence"))),

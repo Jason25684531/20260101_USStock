@@ -25,11 +25,13 @@ try:
     from strategies.src.config import DB_URI, UNIVERSE_TICKERS, calc_rsi
     from strategies.src.agents import SentimentAgent
     from strategies.src.core.position_sizing import calculate_position_size
+    from strategies.src.ml.features import add_institutional_and_sentiment_feature_columns
     from strategies.src.policies import GrowthAwarePolicy
 except ModuleNotFoundError:
     from config import DB_URI, UNIVERSE_TICKERS, calc_rsi
     from agents import SentimentAgent
     from core.position_sizing import calculate_position_size
+    from ml.features import add_institutional_and_sentiment_feature_columns
     from policies import GrowthAwarePolicy
 
 MODEL_MODULE_PATH = Path(__file__).resolve().parents[1] / "ml" / "model.py"
@@ -407,6 +409,10 @@ def save_daily_screener_results(results_df: pd.DataFrame, top_n: int = 5) -> int
             dupont_pass TINYINT(1) DEFAULT 0,
             ml_confidence DECIMAL(4,3) DEFAULT NULL,
             current_price DECIMAL(12,4) NOT NULL,
+            whale_held_pct DECIMAL(10,4),
+            inst_count INT,
+            institutional_net_buy DECIMAL(18,4),
+            sentiment_score DECIMAL(8,4),
             support_1 DECIMAL(12,4),
             support_2 DECIMAL(12,4),
             resistance_1 DECIMAL(12,4),
@@ -422,6 +428,15 @@ def save_daily_screener_results(results_df: pd.DataFrame, top_n: int = 5) -> int
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """
     )
+    alter_table_sql = text(
+        """
+        ALTER TABLE daily_recommendations
+            ADD COLUMN IF NOT EXISTS whale_held_pct DECIMAL(10,4) NULL,
+            ADD COLUMN IF NOT EXISTS inst_count INT NULL,
+            ADD COLUMN IF NOT EXISTS institutional_net_buy DECIMAL(18,4) NULL,
+            ADD COLUMN IF NOT EXISTS sentiment_score DECIMAL(8,4) NULL
+        """
+    )
 
     insert_sql = text(
         """
@@ -429,12 +444,14 @@ def save_daily_screener_results(results_df: pd.DataFrame, top_n: int = 5) -> int
             scan_date, symbol, rank_position, signal_type, total_score,
             breakout_pass, acceleration_pass, peg_pass, dupont_pass,
             ml_confidence, current_price,
+            whale_held_pct, inst_count, institutional_net_buy, sentiment_score,
             support_1, support_2, resistance_1, resistance_2,
             pe_ratio, peg_ratio, pb_ratio, roe, strategy_details
         ) VALUES (
             :scan_date, :symbol, :rank_position, :signal_type, :total_score,
             :breakout_pass, :acceleration_pass, :peg_pass, :dupont_pass,
             :ml_confidence, :current_price,
+            :whale_held_pct, :inst_count, :institutional_net_buy, :sentiment_score,
             :support_1, :support_2, :resistance_1, :resistance_2,
             :pe_ratio, :peg_ratio, :pb_ratio, :roe, :strategy_details
         )
@@ -448,6 +465,10 @@ def save_daily_screener_results(results_df: pd.DataFrame, top_n: int = 5) -> int
             dupont_pass = VALUES(dupont_pass),
             ml_confidence = VALUES(ml_confidence),
             current_price = VALUES(current_price),
+            whale_held_pct = VALUES(whale_held_pct),
+            inst_count = VALUES(inst_count),
+            institutional_net_buy = VALUES(institutional_net_buy),
+            sentiment_score = VALUES(sentiment_score),
             pe_ratio = VALUES(pe_ratio),
             peg_ratio = VALUES(peg_ratio),
             strategy_details = VALUES(strategy_details)
@@ -456,6 +477,10 @@ def save_daily_screener_results(results_df: pd.DataFrame, top_n: int = 5) -> int
 
     with ENGINE.begin() as conn:
         conn.execute(create_table_sql)
+        try:
+            conn.execute(alter_table_sql)
+        except Exception as error:
+            print(f"[WARN] daily_recommendations enrichment schema check skipped: {error}")
         for rank, (_, row) in enumerate(top_df.iterrows(), start=1):
             strategy_details = {
                 "engine": "ml_strategy",
@@ -467,6 +492,10 @@ def save_daily_screener_results(results_df: pd.DataFrame, top_n: int = 5) -> int
                 "sell_price": _to_sql_nullable(row.get("sell_price")),
                 "suggested_allocation_pct": _to_sql_nullable(row.get("suggested_allocation_pct")),
                 "market_regime": _to_sql_nullable(row.get("market_regime")),
+                "whale_held_pct": _to_sql_nullable(row.get("whale_held_pct")),
+                "inst_count": _to_sql_nullable(row.get("inst_count")),
+                "institutional_net_buy": _to_sql_nullable(row.get("institutional_net_buy")),
+                "sentiment_score": _to_sql_nullable(row.get("sentiment_score")),
             }
             conn.execute(
                 insert_sql,
@@ -482,6 +511,10 @@ def save_daily_screener_results(results_df: pd.DataFrame, top_n: int = 5) -> int
                     "dupont_pass": 0,
                     "ml_confidence": round(float(row["xgboost_score"]), 3),
                     "current_price": float(row["latest_close"]),
+                    "whale_held_pct": _to_sql_nullable(row.get("whale_held_pct")),
+                    "inst_count": _to_sql_nullable(row.get("inst_count")),
+                    "institutional_net_buy": _to_sql_nullable(row.get("institutional_net_buy")),
+                    "sentiment_score": _to_sql_nullable(row.get("sentiment_score")),
                     "support_1": _to_sql_nullable(row.get("buy_price")),
                     "support_2": None,
                     "resistance_1": _to_sql_nullable(row.get("sell_price")),
@@ -509,10 +542,16 @@ def _get_model() -> StrategyModel:
 def load_data_from_db(symbol: str) -> pd.DataFrame:
     query = text(
         """
-        SELECT *
-        FROM price_data_v2
-        WHERE symbol = :symbol
-        ORDER BY date ASC
+        SELECT p.*,
+               sr.whale_held_pct,
+               sr.inst_count,
+               sr.institutional_net_buy,
+               sr.sentiment_score
+        FROM price_data_v2 p
+        LEFT JOIN symbols_registry sr
+          ON sr.symbol = p.symbol
+        WHERE p.symbol = :symbol
+        ORDER BY p.date ASC
         """
     )
 
@@ -592,6 +631,8 @@ def calculate_v30_features(df: pd.DataFrame) -> pd.DataFrame:
         lambda values: np.polyfit(np.arange(len(values)), values, 1)[0] if len(values) == 10 else 0,
         raw=True,
     ).fillna(0)
+
+    features = add_institutional_and_sentiment_feature_columns(features)
 
     features = features.dropna(subset=CRITICAL_FEATURES)
 
@@ -675,6 +716,14 @@ def evaluate_symbol(
         "sell_price": valuation["sell_price"],
         "suggested_position_value": sizing["max_position_value"],
         "suggested_allocation_pct": round(float(sizing["allocation_pct"]) * 100, 2),
+        "whale_held_pct": _to_sql_nullable(latest_row.get("whale_held_pct")),
+        "inst_count": _to_sql_nullable(latest_row.get("inst_count")),
+        "institutional_net_buy": _to_sql_nullable(latest_row.get("institutional_net_buy")),
+        "sentiment_score": _to_sql_nullable(latest_row.get("sentiment_score")),
+        "whale_concentration": _to_sql_nullable(latest_row.get("whale_concentration")),
+        "inst_trust_score": _to_sql_nullable(latest_row.get("inst_trust_score")),
+        "institutional_net_buy_score": _to_sql_nullable(latest_row.get("institutional_net_buy_score")),
+        "news_sentiment": _to_sql_nullable(latest_row.get("news_sentiment")),
     }
 
 

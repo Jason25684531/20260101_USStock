@@ -49,6 +49,9 @@ services:
       - MODEL_PATH=/app/data/model.pkl
       - TZ=America/New_York
       - TRADING_MODE=simulation
+      - LINE_CHANNEL_ACCESS_TOKEN=${LINE_CHANNEL_TOKEN}
+      - LINE_CHANNEL_SECRET=${LINE_CHANNEL_SECRET}
+      - LINE_USER_ID=${LINE_USER_ID}
     volumes:
       - .:/app
       - ./strategies/src:/app/src

@@ -118,6 +118,12 @@ def _is_bare_ticker_command(text_value: str) -> bool:
     return bool(_TICKER_PATTERN.fullmatch(stripped))
 
 
+def _nullable_bool(value):
+    if value is None:
+        return None
+    return bool(value)
+
+
 def _derive_eps_ttm(current_price, pe_ratio, forward_pe):
     price = _safe_float(current_price)
     pe = _safe_float(pe_ratio)
@@ -348,6 +354,13 @@ def _resolve_existing_column(conn, table_name, column_candidates):
         if _column_exists(conn, table_name, column_name):
             return column_name
     return None
+
+
+def _select_optional_column(conn, table_name, column_candidates, alias, default_sql='NULL'):
+    column_name = _resolve_existing_column(conn, table_name, column_candidates)
+    if column_name:
+        return f'{column_name} AS {alias}'
+    return f'{default_sql} AS {alias}'
 
 
 def _format_trade_date(value):
@@ -774,6 +787,31 @@ def handle_follow_event(event: dict):
 # ============================================
 # 命令解析
 # ============================================
+def _cmd_recommendation_strategy_help() -> List[dict]:
+    return [_text_msg(
+        "我目前支援這些推薦指令：\n\n"
+        "推薦：XGBoost 綜合大腦 Top 5\n"
+        "推薦 動量：技術面動量策略\n"
+        "推薦 機構：機構跟單策略\n"
+        "推薦 籌碼：籌碼暴風眼策略"
+    )]
+
+
+def _route_recommendation_command(text_value: str) -> Optional[List[dict]]:
+    stripped = (text_value or '').strip()
+    if '推薦' not in stripped:
+        return None
+
+    compact = ''.join(stripped.split())
+    if compact == '推薦':
+        return _cmd_default_recommendations()
+    if '動量' in stripped:
+        return _cmd_momentum_recommendations()
+    if '機構' in stripped or '籌碼' in stripped:
+        return _cmd_institutional_recommendations()
+    return _cmd_recommendation_strategy_help()
+
+
 def process_command(text: str, user_id: Optional[str] = None) -> Optional[List[dict]]:
     """
     處理用戶命令
@@ -787,8 +825,12 @@ def process_command(text: str, user_id: Optional[str] = None) -> Optional[List[d
     if cmd in ('web', '/web', '網址'):
         return _cmd_web()
 
+    recommendation_messages = _route_recommendation_command(text)
+    if recommendation_messages is not None:
+        return recommendation_messages
+
     # --- Top5 / scan 命令 ---
-    if cmd in ('top5', 'top 5', '推薦', '/top5'):
+    if cmd in ('top5', 'top 5', '/top5'):
         return _cmd_top5()
 
     if cmd == '/scan':
@@ -1211,6 +1253,297 @@ def _cmd_status() -> List[dict]:
 # ============================================
 # Top5 命令：查詢最新選股推薦
 # ============================================
+_DAILY_RECOMMENDATION_COLUMNS = (
+    ('rank_position', 'rank_position', '0'),
+    ('signal_type', 'signal_type', "'BUY'"),
+    ('total_score', 'total_score', '0'),
+    ('current_price', 'current_price', '0'),
+    ('target_price', 'target_price', 'NULL'),
+    ('ml_confidence', 'ml_confidence', '0'),
+    ('institutional_ownership', 'institutional_ownership', 'NULL'),
+    ('insider_sentiment', 'insider_sentiment', "'NEUTRAL'"),
+    ('institutional_pass', 'institutional_pass', 'NULL'),
+    ('money_flow_pass', 'money_flow_pass', 'NULL'),
+    ('valuation_status', 'valuation_status', "'FAIR'"),
+    ('buy_price', 'buy_price', 'NULL'),
+    ('sell_price', 'sell_price', 'NULL'),
+    ('reason_summary', 'reason_summary', 'NULL'),
+    ('support_1', 'support_1', 'NULL'),
+    ('resistance_1', 'resistance_1', 'NULL'),
+    ('breakout_pass', 'breakout_pass', '0'),
+    ('acceleration_pass', 'acceleration_pass', '0'),
+    ('peg_pass', 'peg_pass', '0'),
+    ('dupont_pass', 'dupont_pass', '0'),
+    ('multi_tf_momentum_pass', 'multi_tf_momentum_pass', '0'),
+    ('relative_strength_pass', 'relative_strength_pass', '0'),
+    ('volume_structure_pass', 'volume_structure_pass', '0'),
+    ('whale_held_pct', 'whale_held_pct', 'NULL'),
+    ('inst_count', 'inst_count', 'NULL'),
+    ('institutional_net_buy', 'institutional_net_buy', 'NULL'),
+)
+
+
+def _daily_recommendation_select_columns(conn) -> str:
+    parts = ['symbol']
+    for column_name, alias, default_sql in _DAILY_RECOMMENDATION_COLUMNS:
+        parts.append(_select_optional_column(conn, 'daily_recommendations', [column_name], alias, default_sql))
+    parts.append(
+        _select_optional_column(
+            conn,
+            'daily_recommendations',
+            ['news_sentiment', 'sentiment_score'],
+            'news_sentiment',
+            'NULL',
+        )
+    )
+    return ',\n                       '.join(parts)
+
+
+def _row_to_recommendation(conn, row_mapping, rank=None, reason_prefix: str | None = None) -> dict:
+    institutional_pass = _nullable_bool(row_mapping.get('institutional_pass'))
+    money_flow_pass = _nullable_bool(row_mapping.get('money_flow_pass'))
+    reason = row_mapping.get('reason_summary') or '綜合訊號中性，待更多確認'
+    if reason_prefix:
+        reason = f'{reason_prefix}：{reason}'
+
+    return {
+        'symbol': row_mapping.get('symbol'),
+        'rank': rank if rank is not None else int(row_mapping.get('rank_position') or 0),
+        'signal': row_mapping.get('signal_type') or 'BUY',
+        'total_score': _safe_float(row_mapping.get('total_score')) or 0,
+        'current_price': _safe_float(row_mapping.get('current_price')) or 0,
+        'target_price': _safe_float(row_mapping.get('target_price')),
+        'ml_confidence': _safe_float(row_mapping.get('ml_confidence')) or 0,
+        'institutional_ownership': _safe_float(row_mapping.get('institutional_ownership')),
+        'insider_sentiment': row_mapping.get('insider_sentiment') or 'NEUTRAL',
+        'institutional_pass': institutional_pass,
+        'money_flow_pass': money_flow_pass,
+        'smart_money_trend': _build_smart_money_trend(
+            institutional_pass,
+            money_flow_pass,
+            row_mapping.get('insider_sentiment'),
+        ),
+        'today_flow': _build_today_flow_snapshot(
+            conn,
+            row_mapping.get('symbol'),
+            money_flow_pass=money_flow_pass,
+        ) if row_mapping.get('symbol') else None,
+        'valuation_status': row_mapping.get('valuation_status') or 'FAIR',
+        'buy_price': _safe_float(row_mapping.get('buy_price')),
+        'sell_price': _safe_float(row_mapping.get('sell_price')),
+        'reason_summary': reason,
+        'support_1': _safe_float(row_mapping.get('support_1')),
+        'resistance_1': _safe_float(row_mapping.get('resistance_1')),
+        'breakout_pass': bool(row_mapping.get('breakout_pass')),
+        'acceleration_pass': bool(row_mapping.get('acceleration_pass')),
+        'peg_pass': bool(row_mapping.get('peg_pass')),
+        'dupont_pass': bool(row_mapping.get('dupont_pass')),
+        'whale_held_pct': _safe_float(row_mapping.get('whale_held_pct')),
+        'inst_count': _safe_float(row_mapping.get('inst_count')),
+        'institutional_net_buy': _safe_float(row_mapping.get('institutional_net_buy')),
+        'news_sentiment': _safe_float(row_mapping.get('news_sentiment')),
+    }
+
+
+def _latest_recommendation_date(conn):
+    from sqlalchemy import text as sql_text
+
+    if not _table_exists(conn, 'daily_recommendations'):
+        return None
+    return conn.execute(sql_text("SELECT MAX(scan_date) FROM daily_recommendations")).scalar()
+
+
+def _recommendation_quick_reply(recs: list) -> dict:
+    quick_items = [
+        {"type": "action", "action": {"type": "message", "label": f"📌{r['symbol']}", "text": f"/stock {r['symbol']}"}}
+        for r in recs[:5]
+    ]
+    quick_items.append({"type": "action", "action": {"type": "message", "label": "📈 市場", "text": "/market"}})
+    return {"items": quick_items}
+
+
+def _cmd_default_recommendations() -> List[dict]:
+    """Default XGBoost route with final smart-money quality filters."""
+    try:
+        from sqlalchemy import text as sql_text
+        engine = _get_db_engine()
+
+        with engine.connect() as conn:
+            latest = _latest_recommendation_date(conn)
+            if not latest:
+                return [_text_msg("📊 尚無選股推薦資料，請先執行每日推薦流程。")]
+
+            select_columns = _daily_recommendation_select_columns(conn)
+            rows = conn.execute(sql_text(f"""
+                SELECT {select_columns}
+                FROM daily_recommendations
+                WHERE scan_date = :d
+                ORDER BY ml_confidence DESC, total_score DESC, rank_position ASC
+                LIMIT 30
+            """), {'d': str(latest)}).mappings()
+
+            recs = []
+            for row in rows:
+                news_sentiment = _safe_float(row.get('news_sentiment'))
+                whale_held_pct = _safe_float(row.get('whale_held_pct'))
+                if news_sentiment is not None and news_sentiment < 0:
+                    continue
+                if whale_held_pct is not None and whale_held_pct == 0:
+                    continue
+                recs.append(_row_to_recommendation(conn, row, rank=len(recs) + 1, reason_prefix='XGBoost 綜合大腦'))
+                if len(recs) >= 5:
+                    break
+
+            if not recs:
+                return [_text_msg("📊 目前沒有通過新聞情緒與籌碼濾網的推薦標的。")]
+
+            flex = _build_top5_flex(recs, f"{str(latest)} XGBoost+籌碼濾網")
+            flex["quickReply"] = _recommendation_quick_reply(recs)
+            return [flex]
+
+    except Exception as e:
+        _log_linebot(f"Default recommendation lookup failed: {e}")
+        return [_text_msg(f"❌ 推薦查詢失敗: {e}")]
+
+
+def _cmd_momentum_recommendations() -> List[dict]:
+    """Technical momentum route using existing recommendation pass flags."""
+    try:
+        from sqlalchemy import text as sql_text
+        engine = _get_db_engine()
+
+        with engine.connect() as conn:
+            latest = _latest_recommendation_date(conn)
+            if not latest:
+                return [_text_msg("📊 尚無動量策略資料，請先執行每日推薦流程。")]
+
+            select_columns = _daily_recommendation_select_columns(conn)
+            rows = list(conn.execute(sql_text(f"""
+                SELECT {select_columns}
+                FROM daily_recommendations
+                WHERE scan_date = :d
+                LIMIT 100
+            """), {'d': str(latest)}).mappings())
+
+            def momentum_score(row):
+                flags = (
+                    row.get('breakout_pass'),
+                    row.get('acceleration_pass'),
+                    row.get('multi_tf_momentum_pass'),
+                    row.get('relative_strength_pass'),
+                    row.get('volume_structure_pass'),
+                )
+                return (
+                    sum(1 for flag in flags if bool(flag)),
+                    _safe_float(row.get('total_score')) or 0,
+                    _safe_float(row.get('ml_confidence')) or 0,
+                )
+
+            ranked_rows = sorted(rows, key=momentum_score, reverse=True)[:5]
+            recs = [
+                _row_to_recommendation(conn, row, rank=index + 1, reason_prefix='技術面動量策略')
+                for index, row in enumerate(ranked_rows)
+            ]
+
+            if not recs:
+                return [_text_msg("📊 目前沒有可用的動量策略標的。")]
+
+            flex = _build_top5_flex(recs, f"{str(latest)} 動量策略")
+            flex["quickReply"] = _recommendation_quick_reply(recs)
+            return [flex]
+
+    except Exception as e:
+        _log_linebot(f"Momentum recommendation lookup failed: {e}")
+        return [_text_msg(f"❌ 動量策略查詢失敗: {e}")]
+
+
+def _cmd_institutional_recommendations() -> List[dict]:
+    """Institutional-following route from symbols_registry concentration data."""
+    try:
+        from sqlalchemy import text as sql_text
+        engine = _get_db_engine()
+
+        with engine.connect() as conn:
+            if not _table_exists(conn, 'symbols_registry'):
+                return [_text_msg("📊 尚無 symbols_registry 籌碼資料。")]
+
+            whale_column = _resolve_existing_column(conn, 'symbols_registry', ['whale_held_pct'])
+            inst_column = _resolve_existing_column(conn, 'symbols_registry', ['inst_count'])
+            if not whale_column and not inst_column:
+                return [_text_msg("📊 尚無機構籌碼欄位資料，暫時無法產生機構跟單推薦。")]
+
+            select_parts = [
+                'symbol',
+                _select_optional_column(conn, 'symbols_registry', ['sector'], 'sector', 'NULL'),
+                _select_optional_column(conn, 'symbols_registry', ['whale_held_pct'], 'whale_held_pct', 'NULL'),
+                _select_optional_column(conn, 'symbols_registry', ['inst_count'], 'inst_count', 'NULL'),
+                _select_optional_column(conn, 'symbols_registry', ['institutional_net_buy'], 'institutional_net_buy', 'NULL'),
+                _select_optional_column(conn, 'symbols_registry', ['sentiment_score', 'news_sentiment'], 'news_sentiment', 'NULL'),
+            ]
+            where_parts = []
+            if _column_exists(conn, 'symbols_registry', 'is_active'):
+                where_parts.append('COALESCE(is_active, 0) = 1')
+            whale_rank_expr = 'COALESCE(whale_held_pct, 0)' if whale_column else '0'
+            inst_rank_expr = 'COALESCE(inst_count, 0)' if inst_column else '0'
+            if whale_column or inst_column:
+                where_parts.append(f'({whale_rank_expr} > 0 OR {inst_rank_expr} > 0)')
+            where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ''
+
+            rows = conn.execute(sql_text(f"""
+                SELECT {', '.join(select_parts)}
+                FROM symbols_registry
+                {where_sql}
+                ORDER BY {whale_rank_expr} DESC, {inst_rank_expr} DESC
+                LIMIT 5
+            """)).mappings()
+
+            recs = []
+            for index, row in enumerate(rows):
+                whale_held_pct = _safe_float(row.get('whale_held_pct'))
+                inst_count = _safe_float(row.get('inst_count'))
+                score = min(5.0, ((whale_held_pct or 0) / 20.0) + ((inst_count or 0) / 1000.0))
+                recs.append({
+                    'symbol': row.get('symbol'),
+                    'rank': index + 1,
+                    'signal': 'WATCH',
+                    'total_score': round(score, 2),
+                    'current_price': 0,
+                    'target_price': None,
+                    'ml_confidence': 0,
+                    'institutional_ownership': whale_held_pct,
+                    'insider_sentiment': 'NEUTRAL',
+                    'institutional_pass': True,
+                    'money_flow_pass': None,
+                    'smart_money_trend': '機構集中',
+                    'today_flow': None,
+                    'valuation_status': 'FAIR',
+                    'buy_price': None,
+                    'sell_price': None,
+                    'reason_summary': f"機構跟單策略：Whale {whale_held_pct if whale_held_pct is not None else 'N/A'} / Holders {int(inst_count) if inst_count is not None else 'N/A'}",
+                    'support_1': None,
+                    'resistance_1': None,
+                    'breakout_pass': False,
+                    'acceleration_pass': False,
+                    'peg_pass': False,
+                    'dupont_pass': False,
+                    'whale_held_pct': whale_held_pct,
+                    'inst_count': inst_count,
+                    'institutional_net_buy': _safe_float(row.get('institutional_net_buy')),
+                    'news_sentiment': _safe_float(row.get('news_sentiment')),
+                })
+
+            if not recs:
+                return [_text_msg("📊 目前沒有可用的機構籌碼推薦標的。")]
+
+            flex = _build_top5_flex(recs, "機構籌碼策略")
+            flex["quickReply"] = _recommendation_quick_reply(recs)
+            return [flex]
+
+    except Exception as e:
+        _log_linebot(f"Institutional recommendation lookup failed: {e}")
+        return [_text_msg(f"❌ 機構策略查詢失敗: {e}")]
+
+
 def _cmd_top5() -> List[dict]:
     """查詢 DB 最新 Top 5 推薦，回傳 Flex Carousel"""
     try:

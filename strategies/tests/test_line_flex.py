@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import math
 import re
 from pathlib import Path
 
@@ -81,6 +83,57 @@ def test_decision_bubble_has_no_null_text_and_uses_hex_colors():
     assert all(isinstance(value, str) and value.strip() for value in text_values)
     assert color_values
     assert all(isinstance(color, str) and HEX_COLOR_RE.match(color) for color in color_values)
+
+
+def test_decision_bubble_renders_enriched_institutional_and_sentiment_rows():
+    from utils.line_flex import build_decision_bubble
+
+    bubble = build_decision_bubble(
+        {
+            "symbol": "NVDA",
+            "valuation_status": "FAIR",
+            "current_price": 120.0,
+            "target_price": 140.0,
+            "whale_held_pct": 72.5,
+            "inst_count": 1500,
+            "institutional_net_buy": 12.5,
+            "sentiment_score": 0.35,
+        }
+    )
+
+    text_values = [
+        node["text"]
+        for node in _iter_dict_nodes(bubble)
+        if "text" in node
+    ]
+
+    assert "Whale / Holders" in text_values
+    assert "72.5% / 1500" in text_values
+    assert "Net Buy / Sentiment" in text_values
+    assert "12.50 / +0.35" in text_values
+
+
+def test_decision_bubble_sanitizes_invalid_enrichment_values_for_json():
+    from utils.line_flex import build_decision_bubble
+
+    bubble = build_decision_bubble(
+        {
+            "symbol": "NVDA",
+            "valuation_status": "FAIR",
+            "current_price": 120.0,
+            "target_price": 140.0,
+            "whale_held_pct": math.nan,
+            "inst_count": float("inf"),
+            "institutional_net_buy": "not-a-number",
+            "sentiment_score": float("-inf"),
+        }
+    )
+
+    payload = json.dumps(bubble, ensure_ascii=False)
+    assert "NaN" not in payload
+    assert "Infinity" not in payload
+    assert "Whale / Holders" in payload
+    assert "Net Buy / Sentiment" in payload
 
 
 def test_daily_screener_flex_is_null_safe_for_premium_growth():

@@ -45,6 +45,10 @@ def check_flex_structure() -> bool:
             "valuation_status": "UNDERVALUED",
             "institutional_ownership": 0.71,
             "insider_sentiment": "BUYING",
+            "whale_held_pct": 72.5,
+            "inst_count": 1500,
+            "institutional_net_buy": 12.5,
+            "sentiment_score": 0.35,
             "ml_confidence": 0.65,
             "reason_summary": "技術面突破 | 法人籌碼支持 | 🔥內部人買進",
         },
@@ -60,6 +64,10 @@ def check_flex_structure() -> bool:
             "valuation_status": "PREMIUM_GROWTH",
             "institutional_ownership": 0.64,
             "insider_sentiment": "NEUTRAL",
+            "whale_held_pct": None,
+            "inst_count": None,
+            "institutional_net_buy": None,
+            "sentiment_score": None,
             "ml_confidence": 0.58,
             "reason_summary": "高成長估值溢價已納入，Flex 仍需維持 FAIR 風格",
         },
@@ -70,6 +78,11 @@ def check_flex_structure() -> bool:
     assert bubble["header"]["backgroundColor"] == "#00C853"
     assert bubble["footer"]["contents"][0]["type"] == "separator"
     assert bubble["footer"]["contents"][1]["text"] == "Reason"
+    bubble_json = json.dumps(bubble, ensure_ascii=False)
+    assert "Whale / Holders" in bubble_json
+    assert "72.5% / 1500" in bubble_json
+    assert "Net Buy / Sentiment" in bubble_json
+    assert "12.50 / +0.35" in bubble_json
 
     kv = flex_kv("Score", "3.5/5")
     assert kv["type"] == "box"

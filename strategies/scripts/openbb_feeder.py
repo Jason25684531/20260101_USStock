@@ -19,25 +19,154 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from strategies.src.adapters.institutional_activity import fetch_and_store_institutional_activity
-from strategies.src.config import DB_URI, DEFAULT_SYMBOLS, NEWS_LIMIT, NEWS_PROVIDER, OPENBB_API_URL
-from strategies.src.symbol_registry import (
-    DEFAULT_BENCHMARK_SYMBOLS,
-    deactivate_missing_memberships,
-    dedupe_symbols,
-    load_active_symbols,
-    normalize_symbol,
-    refresh_registry_activity,
-    seed_benchmark_memberships,
-    upsert_membership,
-    upsert_symbol,
-)
+try:
+    from strategies.src.adapters.institutional_activity import fetch_and_store_institutional_activity
+    from strategies.src.config import DB_URI, DEFAULT_SYMBOLS, NEWS_LIMIT, NEWS_PROVIDER, OPENBB_API_URL
+    from strategies.src.symbol_registry import (
+        DEFAULT_BENCHMARK_SYMBOLS,
+        deactivate_missing_memberships,
+        dedupe_symbols,
+        load_active_symbols,
+        normalize_symbol,
+        refresh_registry_activity,
+        seed_benchmark_memberships,
+        upsert_membership,
+        upsert_symbol,
+        upsert_symbol_enrichment,
+    )
+except ModuleNotFoundError:
+    from adapters.institutional_activity import fetch_and_store_institutional_activity
+    from config import DB_URI, DEFAULT_SYMBOLS, NEWS_LIMIT, NEWS_PROVIDER, OPENBB_API_URL
+    from symbol_registry import (
+        DEFAULT_BENCHMARK_SYMBOLS,
+        deactivate_missing_memberships,
+        dedupe_symbols,
+        load_active_symbols,
+        normalize_symbol,
+        refresh_registry_activity,
+        seed_benchmark_memberships,
+        upsert_membership,
+        upsert_symbol,
+        upsert_symbol_enrichment,
+    )
 
-engine = create_engine(DB_URI)
+engine = None
+
+
+def _get_engine():
+    global engine
+    if engine is None:
+        engine = create_engine(DB_URI)
+    return engine
 DEFAULT_FEED_SYMBOLS = tuple(sorted({symbol.upper() for symbol in DEFAULT_SYMBOLS} | {"SPY"}))
 INDEX_SYNC_MAP = {
     "SP500": {"provider_symbol": "sp500", "provider": "fmp", "membership_type": "index"},
 }
+POSITIVE_SENTIMENT_TERMS = {
+    "beat",
+    "beats",
+    "upgrade",
+    "upgraded",
+    "growth",
+    "profit",
+    "profits",
+    "record",
+    "strong",
+    "surge",
+}
+NEGATIVE_SENTIMENT_TERMS = {
+    "downgrade",
+    "downgraded",
+    "loss",
+    "losses",
+    "lawsuit",
+    "risk",
+    "weak",
+    "miss",
+    "misses",
+    "probe",
+}
+
+
+def _safe_float(value, *, default=None):
+    try:
+        if value is None:
+            return default
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return default
+    if pd.isna(numeric) or numeric in (float("inf"), float("-inf")):
+        return default
+    return numeric
+
+
+def _safe_count(value):
+    numeric = _safe_float(value)
+    if numeric is None or numeric < 0:
+        return None
+    return int(round(numeric))
+
+
+def _safe_percentage(value):
+    numeric = _safe_float(value)
+    if numeric is None or numeric < 0:
+        return None
+    if numeric <= 1:
+        numeric *= 100
+    return round(numeric, 4)
+
+
+def _score_news_sentiment(news_df: pd.DataFrame | None) -> float:
+    if news_df is None or news_df.empty:
+        return 0.0
+
+    score = 0
+    for _, row in news_df.iterrows():
+        text_value = f"{row.get('title', '')} {row.get('summary', '')}".lower()
+        tokens = {token.strip(".,;:!?()[]{}'\"") for token in text_value.split()}
+        score += len(tokens & POSITIVE_SENTIMENT_TERMS)
+        score -= len(tokens & NEGATIVE_SENTIMENT_TERMS)
+
+    if score == 0:
+        return 0.0
+    return round(max(-1.0, min(1.0, score / max(len(news_df), 1))), 4)
+
+
+def build_registry_enrichment(snapshot: dict | None, news_df: pd.DataFrame | None) -> dict:
+    snapshot = snapshot or {}
+    holder_count = _safe_count(
+        snapshot.get("institution_holders_count")
+        or snapshot.get("inst_count")
+        or snapshot.get("holders_count")
+    )
+    whale_held_pct = _safe_percentage(
+        snapshot.get("whale_held_pct")
+        or snapshot.get("top_holder_pct")
+        or snapshot.get("held_percent_institutions")
+    )
+
+    net_buy_parts = [
+        _safe_float(snapshot.get("institution_avg_pct_change")),
+        _safe_float(snapshot.get("mutualfund_avg_pct_change")),
+        _safe_float(snapshot.get("institutional_net_buy")),
+    ]
+    valid_net_buy_parts = [value for value in net_buy_parts if value is not None]
+    institutional_net_buy = (
+        round(sum(valid_net_buy_parts), 4)
+        if valid_net_buy_parts
+        else None
+    )
+
+    return {
+        "whale_held_pct": whale_held_pct,
+        "inst_count": holder_count,
+        "institutional_net_buy": institutional_net_buy,
+        "sentiment_score": _score_news_sentiment(news_df),
+    }
+
+
+def upsert_registry_enrichment(conn, symbol: str, enrichment: dict | None) -> None:
+    upsert_symbol_enrichment(conn, symbol, enrichment or {})
 
 
 def _extract_results(payload):
@@ -141,7 +270,7 @@ def _replace_price_rows(symbol: str, df: pd.DataFrame) -> int:
     if df.empty:
         return 0
 
-    with engine.begin() as conn:
+    with _get_engine().begin() as conn:
         conn.exec_driver_sql("DELETE FROM price_data_v2 WHERE symbol = %s", (symbol.upper(),))
         df.to_sql("price_data_v2", con=conn, if_exists="append", index=False)
     return len(df)
@@ -271,13 +400,13 @@ def sync_from_indices(index_codes: list[str] | None = None, batch_size: int = 20
             }
             continue
 
-        with engine.begin() as conn:
+        with _get_engine().begin() as conn:
             seed_benchmark_memberships(conn, DEFAULT_BENCHMARK_SYMBOLS)
             run_id = _create_sync_run(conn, index_code, len(constituents))
 
         for batch in _chunked(constituents, batch_size):
             try:
-                with engine.begin() as conn:
+                with _get_engine().begin() as conn:
                     for item in batch:
                         upsert_symbol(
                             conn,
@@ -299,7 +428,7 @@ def sync_from_indices(index_codes: list[str] | None = None, batch_size: int = 20
             except Exception as error:
                 errors.append(str(error))
 
-        with engine.begin() as conn:
+        with _get_engine().begin() as conn:
             deactivate_missing_memberships(conn, index_code, [item["symbol"] for item in constituents])
             refresh_registry_activity(conn)
             final_status = "completed" if not errors else "partial_failed"
@@ -355,7 +484,7 @@ def fetch_and_store_news(symbol: str, provider: str = NEWS_PROVIDER, limit: int 
             print(f"{symbol}: 沒有可寫入的新聞資料")
             return news_df
 
-        news_df.to_sql("news_cache", con=engine, if_exists="append", index=False)
+        news_df.to_sql("news_cache", con=_get_engine(), if_exists="append", index=False)
         print(f"{symbol}: 寫入 {len(news_df)} 則新聞")
         return news_df
     except Exception as error:
@@ -383,7 +512,7 @@ def fetch_and_store_holder_activity(symbol: str):
 
 def _load_symbols_for_default_feed() -> list[str]:
     return load_active_symbols(
-        engine,
+        _get_engine(),
         fallback_symbols=DEFAULT_FEED_SYMBOLS,
         include_benchmarks=True,
     )
@@ -427,10 +556,18 @@ def main() -> int:
 
     for index, ticker in enumerate(symbols):
         fetch_and_store_price(ticker)
+        news_df = pd.DataFrame()
+        institutional_snapshot = {}
         if not args.skip_news:
-            fetch_and_store_news(ticker)
+            news_df = fetch_and_store_news(ticker)
         if not args.skip_institutional:
-            fetch_and_store_holder_activity(ticker)
+            institutional_snapshot = fetch_and_store_holder_activity(ticker)
+        try:
+            enrichment = build_registry_enrichment(institutional_snapshot, news_df)
+            with _get_engine().begin() as conn:
+                upsert_registry_enrichment(conn, ticker, enrichment)
+        except Exception as error:
+            print(f"{ticker}: registry enrichment update failed: {error}")
         if index < len(symbols) - 1 and args.sleep > 0:
             time.sleep(args.sleep)
 

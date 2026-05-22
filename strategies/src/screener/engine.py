@@ -72,6 +72,20 @@ class DailyScreener:
         return round(numeric * 100, 4) if numeric <= 1 else round(numeric, 4)
 
     @classmethod
+    def _normalize_count(cls, value):
+        numeric = cls._normalize_optional_number(value)
+        if numeric is None or numeric < 0:
+            return None
+        return int(round(numeric))
+
+    @classmethod
+    def _normalize_sentiment_score(cls, value):
+        numeric = cls._normalize_optional_number(value)
+        if numeric is None:
+            return None
+        return round(max(-1.0, min(1.0, numeric)), 4)
+
+    @classmethod
     def _blend_buy_price(cls, support_1, fair_price, fallback_buy_price):
         normalized_support = cls._normalize_optional_number(support_1)
         normalized_fair_price = cls._normalize_optional_number(fair_price)
@@ -122,6 +136,50 @@ class DailyScreener:
             break
 
         return institutional_ownership, insider_sentiment
+
+    @classmethod
+    def _derive_enriched_smart_money(cls, info: dict) -> Dict[str, Optional[float]]:
+        whale_held_pct = None
+        for field in (
+            'whale_held_pct',
+            'topHolderPct',
+            'top_holder_pct',
+            'heldPercentInstitutions',
+            'inst_ownership_pct',
+        ):
+            whale_held_pct = cls._normalize_percentage(info.get(field))
+            if whale_held_pct is not None:
+                break
+
+        inst_count = None
+        for field in (
+            'inst_count',
+            'institutionCount',
+            'institutionalHoldersCount',
+            'numberOfInstitutionalHolders',
+            'inst_holders_count',
+        ):
+            inst_count = cls._normalize_count(info.get(field))
+            if inst_count is not None:
+                break
+
+        institutional_net_buy = None
+        for field in (
+            'institutional_net_buy',
+            'institution_avg_pct_change',
+            'netInstitutionalBuying',
+            'netInsiderSharesBuying',
+        ):
+            institutional_net_buy = cls._normalize_optional_number(info.get(field))
+            if institutional_net_buy is not None:
+                break
+
+        return {
+            'whale_held_pct': whale_held_pct,
+            'inst_count': inst_count,
+            'institutional_net_buy': institutional_net_buy,
+            'sentiment_score': cls._normalize_sentiment_score(info.get('sentiment_score')),
+        }
 
     @staticmethod
     def _build_reason_summary(strategy_details: dict, insider_sentiment: str) -> str:
@@ -453,6 +511,7 @@ class DailyScreener:
                 pass
         target_price = self._normalize_optional_number(info.get('targetMeanPrice'))
         institutional_ownership, insider_sentiment = self._derive_smart_money(info)
+        enrichment = self._derive_enriched_smart_money(info)
 
         close_col = 'Close' if 'Close' in df.columns else 'close'
         current_price = float(df[close_col].iloc[-1])
@@ -527,6 +586,10 @@ class DailyScreener:
             'target_price': target_price,
             'institutional_ownership': institutional_ownership,
             'insider_sentiment': insider_sentiment,
+            'whale_held_pct': enrichment.get('whale_held_pct'),
+            'inst_count': enrichment.get('inst_count'),
+            'institutional_net_buy': enrichment.get('institutional_net_buy'),
+            'sentiment_score': enrichment.get('sentiment_score'),
             'breakout': r_breakout,
             'acceleration': r_accel,
             'peg': r_peg,
@@ -666,6 +729,10 @@ class DailyScreener:
                 'target_price': self._normalize_optional_number(row.get('target_price')),
                 'institutional_ownership': self._normalize_percentage(row.get('institutional_ownership')),
                 'insider_sentiment': insider_sentiment,
+                'whale_held_pct': self._normalize_percentage(row.get('whale_held_pct')),
+                'inst_count': self._normalize_count(row.get('inst_count')),
+                'institutional_net_buy': self._normalize_optional_number(row.get('institutional_net_buy')),
+                'sentiment_score': self._normalize_sentiment_score(row.get('sentiment_score')),
                 'breakout_pass': row['breakout']['pass'],
                 'acceleration_pass': row['acceleration']['pass'],
                 'peg_pass': row['peg']['pass'],
@@ -921,6 +988,10 @@ class DailyScreener:
                         target_price DECIMAL(12,4),
                         institutional_ownership DECIMAL(10,4),
                         insider_sentiment VARCHAR(16) DEFAULT 'NEUTRAL',
+                        whale_held_pct DECIMAL(10,4),
+                        inst_count INT,
+                        institutional_net_buy DECIMAL(18,4),
+                        sentiment_score DECIMAL(8,4),
                         support_1 DECIMAL(12,4),
                         support_2 DECIMAL(12,4),
                         resistance_1 DECIMAL(12,4),
@@ -945,6 +1016,10 @@ class DailyScreener:
                     ('target_price', 'target_price DECIMAL(12,4) NULL AFTER current_price'),
                     ('institutional_ownership', 'institutional_ownership DECIMAL(10,4) NULL AFTER target_price'),
                     ('insider_sentiment', "insider_sentiment VARCHAR(16) NULL DEFAULT 'NEUTRAL' AFTER institutional_ownership"),
+                    ('whale_held_pct', 'whale_held_pct DECIMAL(10,4) NULL AFTER insider_sentiment'),
+                    ('inst_count', 'inst_count INT NULL AFTER whale_held_pct'),
+                    ('institutional_net_buy', 'institutional_net_buy DECIMAL(18,4) NULL AFTER inst_count'),
+                    ('sentiment_score', 'sentiment_score DECIMAL(8,4) NULL AFTER institutional_net_buy'),
                     ('fair_price', 'fair_price DECIMAL(12,4) NULL AFTER roe'),
                     ('buy_price', 'buy_price DECIMAL(12,4) NULL AFTER fair_price'),
                     ('sell_price', 'sell_price DECIMAL(12,4) NULL AFTER buy_price'),
@@ -964,6 +1039,7 @@ class DailyScreener:
                              breakout_pass, acceleration_pass, peg_pass, dupont_pass,
                              ml_confidence, current_price, target_price,
                              institutional_ownership, insider_sentiment,
+                             whale_held_pct, inst_count, institutional_net_buy, sentiment_score,
                              support_1, support_2, resistance_1, resistance_2,
                              pe_ratio, peg_ratio, pb_ratio, roe,
                              fair_price, buy_price, sell_price, valuation_status,
@@ -973,6 +1049,7 @@ class DailyScreener:
                              :bp, :ap, :pp, :dp,
                              :ml, :price, :target_price,
                              :institutional_ownership, :insider_sentiment,
+                             :whale_held_pct, :inst_count, :institutional_net_buy, :sentiment_score,
                              :s1, :s2, :r1, :r2,
                              :pe, :peg, :pb, :roe,
                              :fair_price, :buy_price, :sell_price, :valuation_status,
@@ -990,6 +1067,10 @@ class DailyScreener:
                             target_price = VALUES(target_price),
                             institutional_ownership = VALUES(institutional_ownership),
                             insider_sentiment = VALUES(insider_sentiment),
+                            whale_held_pct = VALUES(whale_held_pct),
+                            inst_count = VALUES(inst_count),
+                            institutional_net_buy = VALUES(institutional_net_buy),
+                            sentiment_score = VALUES(sentiment_score),
                             support_1 = VALUES(support_1),
                             support_2 = VALUES(support_2),
                             resistance_1 = VALUES(resistance_1),
@@ -1019,6 +1100,10 @@ class DailyScreener:
                         'target_price': safe_float(rec.get('target_price')),
                         'institutional_ownership': self._normalize_percentage(rec.get('institutional_ownership')),
                         'insider_sentiment': str(rec.get('insider_sentiment') or 'NEUTRAL').upper(),
+                        'whale_held_pct': self._normalize_percentage(rec.get('whale_held_pct')),
+                        'inst_count': self._normalize_count(rec.get('inst_count')),
+                        'institutional_net_buy': safe_float(rec.get('institutional_net_buy')),
+                        'sentiment_score': self._normalize_sentiment_score(rec.get('sentiment_score')),
                         's1': safe_float(rec.get('support_1')),
                         's2': safe_float(rec.get('support_2')),
                         'r1': safe_float(rec.get('resistance_1')),

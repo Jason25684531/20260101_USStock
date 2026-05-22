@@ -16,6 +16,7 @@ if CORE_SPEC is None or CORE_SPEC.loader is None:
 CORE_MODULE = importlib.util.module_from_spec(CORE_SPEC)
 CORE_SPEC.loader.exec_module(CORE_MODULE)
 main = CORE_MODULE.main
+sys.modules[__name__] = CORE_MODULE
 
 
 if __name__ == "__main__":

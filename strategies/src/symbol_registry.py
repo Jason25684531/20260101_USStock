@@ -11,6 +11,12 @@ except ImportError:
 
 
 DEFAULT_BENCHMARK_SYMBOLS = ("SPY", "QQQ", "IWM")
+REGISTRY_ENRICHMENT_COLUMNS = {
+    "whale_held_pct": "DECIMAL(10,4) NULL",
+    "inst_count": "INT NULL",
+    "institutional_net_buy": "DECIMAL(18,4) NULL",
+    "sentiment_score": "DECIMAL(8,4) NULL",
+}
 
 
 def normalize_symbol(symbol: str | None) -> str:
@@ -30,9 +36,68 @@ def dedupe_symbols(symbols: Iterable[str]) -> list[str]:
     return normalized
 
 
+def _safe_float(value, *, default=None):
+    try:
+        if value is None:
+            return default
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return default
+    if numeric != numeric or numeric in (float("inf"), float("-inf")):
+        return default
+    return numeric
+
+
+def _sanitize_enrichment_payload(payload: dict | None) -> dict:
+    payload = payload or {}
+
+    whale_held_pct = _safe_float(payload.get("whale_held_pct"))
+    if whale_held_pct is not None:
+        if whale_held_pct < 0:
+            whale_held_pct = None
+        elif whale_held_pct <= 1:
+            whale_held_pct *= 100
+        whale_held_pct = round(whale_held_pct, 4) if whale_held_pct is not None else None
+
+    inst_count_value = _safe_float(payload.get("inst_count"))
+    inst_count = None
+    if inst_count_value is not None and inst_count_value >= 0:
+        inst_count = int(round(inst_count_value))
+
+    institutional_net_buy = _safe_float(payload.get("institutional_net_buy"))
+    if institutional_net_buy is not None:
+        institutional_net_buy = round(institutional_net_buy, 4)
+
+    sentiment_score = _safe_float(payload.get("sentiment_score"), default=0.0)
+    sentiment_score = min(1.0, max(-1.0, sentiment_score))
+
+    return {
+        "whale_held_pct": whale_held_pct,
+        "inst_count": inst_count,
+        "institutional_net_buy": institutional_net_buy,
+        "sentiment_score": round(sentiment_score, 4),
+    }
+
+
 def _has_registry_tables(bind) -> bool:
     inspector = inspect(bind)
     return inspector.has_table("symbols_registry") and inspector.has_table("universe_memberships")
+
+
+def ensure_registry_enrichment_columns(conn) -> None:
+    inspector = inspect(conn)
+    if not inspector.has_table("symbols_registry"):
+        return
+
+    existing_columns = {
+        column["name"]
+        for column in inspector.get_columns("symbols_registry")
+    }
+    for column_name, definition_sql in REGISTRY_ENRICHMENT_COLUMNS.items():
+        if column_name in existing_columns:
+            continue
+        conn.execute(text(f"ALTER TABLE symbols_registry ADD COLUMN {column_name} {definition_sql}"))
+        existing_columns.add(column_name)
 
 
 def _fallback_symbols(fallback_symbols: Iterable[str] | None) -> list[str]:
@@ -130,6 +195,49 @@ def upsert_symbol(
         )
 
 
+def upsert_symbol_enrichment(conn, symbol: str, payload: dict | None) -> None:
+    symbol = normalize_symbol(symbol)
+    if not symbol:
+        return
+
+    ensure_registry_enrichment_columns(conn)
+    sanitized = _sanitize_enrichment_payload(payload)
+    existing = conn.execute(
+        text("SELECT symbol FROM symbols_registry WHERE symbol = :symbol"),
+        {"symbol": symbol},
+    ).scalar()
+
+    inspector = inspect(conn)
+    columns = {column["name"] for column in inspector.get_columns("symbols_registry")}
+    updated_at_sql = ", updated_at = CURRENT_TIMESTAMP" if "updated_at" in columns else ""
+
+    if existing:
+        conn.execute(
+            text(f"""
+                UPDATE symbols_registry
+                SET whale_held_pct = :whale_held_pct,
+                    inst_count = :inst_count,
+                    institutional_net_buy = :institutional_net_buy,
+                    sentiment_score = :sentiment_score
+                    {updated_at_sql}
+                WHERE symbol = :symbol
+            """),
+            {"symbol": symbol, **sanitized},
+        )
+    else:
+        conn.execute(
+            text("""
+                INSERT INTO symbols_registry(
+                    symbol, asset_type, is_active, is_benchmark,
+                    whale_held_pct, inst_count, institutional_net_buy, sentiment_score
+                )
+                VALUES (
+                    :symbol, 'EQUITY', 1, 0,
+                    :whale_held_pct, :inst_count, :institutional_net_buy, :sentiment_score
+                )
+            """),
+            {"symbol": symbol, **sanitized},
+        )
 def upsert_membership(
     conn,
     symbol: str,

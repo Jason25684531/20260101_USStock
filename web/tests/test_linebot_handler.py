@@ -26,16 +26,48 @@ class LineBotHandlerTests(unittest.TestCase):
         self.assertEqual(messages, expected_messages)
         stock_cmd.assert_called_once_with("AAPL")
 
-    def test_process_command_prefers_db_top5_for_recommend_keyword(self):
-        expected_messages = [{"type": "flex", "altText": "top5", "contents": {"type": "carousel", "contents": []}}]
+    def test_process_command_routes_exact_recommend_to_default_strategy(self):
+        expected_messages = [{"type": "flex", "altText": "default", "contents": {"type": "carousel", "contents": []}}]
 
-        with patch.object(linebot_handler, "_cmd_top5", return_value=expected_messages) as top5_cmd, \
+        with patch.object(linebot_handler, "_cmd_default_recommendations", return_value=expected_messages, create=True) as default_cmd, \
+             patch.object(linebot_handler, "_cmd_momentum_recommendations", return_value=[{"type": "text", "text": "momentum"}], create=True) as momentum_cmd, \
+             patch.object(linebot_handler, "_cmd_institutional_recommendations", return_value=[{"type": "text", "text": "institutional"}], create=True) as institutional_cmd, \
              patch.object(linebot_handler, "_cmd_top5_realtime", return_value=[{"type": "text", "text": "realtime"}]) as realtime_cmd:
             messages = linebot_handler.process_command("推薦", user_id="user-123")
 
         self.assertEqual(messages, expected_messages)
-        top5_cmd.assert_called_once_with()
+        default_cmd.assert_called_once_with()
+        momentum_cmd.assert_not_called()
+        institutional_cmd.assert_not_called()
         realtime_cmd.assert_not_called()
+
+    def test_process_command_routes_momentum_recommendation(self):
+        expected_messages = [{"type": "flex", "altText": "momentum", "contents": {"type": "carousel", "contents": []}}]
+
+        with patch.object(linebot_handler, "_cmd_momentum_recommendations", return_value=expected_messages, create=True) as momentum_cmd:
+            messages = linebot_handler.process_command("推薦 動量", user_id="user-123")
+
+        self.assertEqual(messages, expected_messages)
+        momentum_cmd.assert_called_once_with()
+
+    def test_process_command_routes_institutional_recommendation_aliases(self):
+        expected_messages = [{"type": "flex", "altText": "institutional", "contents": {"type": "carousel", "contents": []}}]
+
+        for command in ("推薦 機構", "推薦 籌碼"):
+            with self.subTest(command=command), \
+                 patch.object(linebot_handler, "_cmd_institutional_recommendations", return_value=expected_messages, create=True) as institutional_cmd:
+                messages = linebot_handler.process_command(command, user_id="user-123")
+
+            self.assertEqual(messages, expected_messages)
+            institutional_cmd.assert_called_once_with()
+
+    def test_process_command_returns_supported_strategy_hint_for_unknown_recommendation(self):
+        messages = linebot_handler.process_command("推薦 亂碼", user_id="user-123")
+
+        self.assertEqual(messages[0]["type"], "text")
+        self.assertIn("推薦", messages[0]["text"])
+        self.assertIn("動量", messages[0]["text"])
+        self.assertIn("機構", messages[0]["text"])
 
     def test_build_stock_analysis_message_surfaces_growth_aware_valuation(self):
         payload = {
