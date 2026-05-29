@@ -64,6 +64,37 @@ try:
 except ImportError:
     from strategies.src.utils.runtime_config import find_existing_model_path
 
+try:
+    from screener.market_data_resilience import (
+        empty_provider_health as _empty_provider_health_contract,
+        normalize_provider_health,
+    )
+    from screener.swing_ranking import normalize_swing_ranking_metadata
+    from screener.swing_calibration import build_calibration_status, load_active_calibration_profile
+    from screener.swing_calibration_drift import (
+        build_drift_report,
+        list_calibration_profile_backups,
+        read_recent_calibration_audit_events,
+    )
+    from screener.swing_performance import build_performance_payload, load_swing_performance_rows
+    from screener.presentation_utils import safe_float, safe_pct_return
+    from screener.ops_runtime import load_latest_market_data_pull
+except ImportError:
+    from strategies.src.screener.market_data_resilience import (
+        empty_provider_health as _empty_provider_health_contract,
+        normalize_provider_health,
+    )
+    from strategies.src.screener.swing_ranking import normalize_swing_ranking_metadata
+    from strategies.src.screener.swing_calibration import build_calibration_status, load_active_calibration_profile
+    from strategies.src.screener.swing_calibration_drift import (
+        build_drift_report,
+        list_calibration_profile_backups,
+        read_recent_calibration_audit_events,
+    )
+    from strategies.src.screener.swing_performance import build_performance_payload, load_swing_performance_rows
+    from strategies.src.screener.presentation_utils import safe_float, safe_pct_return
+    from strategies.src.screener.ops_runtime import load_latest_market_data_pull
+
 
 # Aliases for backward compatibility (previously defined locally)
 _table_exists = table_exists
@@ -80,6 +111,8 @@ RECOVERABLE_DASHBOARD_DB_ERROR_MARKERS = (
 CHART_PERIOD_LABELS = {'d': '日線', 'w': '週線', 'm': '月線'}
 CHART_HISTORY_LIMITS = {'d': 380, 'w': 260, 'm': 180}
 CHART_FETCH_LIMITS = {'d': 420, 'w': 1500, 'm': 3000}
+PROVIDER_HEALTH_DEGRADED_MODES = {'fallback', 'stale', 'failed'}
+MAX_MACRO_ABS_RETURN = 3.0
 
 
 def _env_positive_int(name, default):
@@ -137,6 +170,7 @@ _backtest_job_state = {
     'last_run_id': None,
     'last_strategy_name': None,
     'output_tail': [],
+    'diagnostics': None,
 }
 
 
@@ -191,6 +225,200 @@ def _handle_dashboard_exception(endpoint_name, payload, error):
     if _is_recoverable_dashboard_error(error):
         return _dashboard_degraded_response(endpoint_name, payload, error)
     return _dashboard_failure_response(endpoint_name, error)
+
+
+def _json_loads_safe(value, default=None):
+    if value in (None, ''):
+        return default
+    if isinstance(value, (dict, list)):
+        return value
+    try:
+        return json.loads(value)
+    except Exception:
+        return default
+
+
+def _sanitize_return_value(value, *, max_abs_return=MAX_MACRO_ABS_RETURN):
+    number = safe_float(value)
+    if number is None:
+        return None, 'missing_value', None
+    sanitized = safe_pct_return(1.0 + number, 1.0, max_abs_return=max_abs_return)
+    if sanitized is None:
+        reason = 'outlier_return' if abs(number) > max_abs_return else 'invalid_value'
+        outlier_reason = f'abs_return_gt_{max_abs_return}' if reason == 'outlier_return' else None
+        return None, reason, outlier_reason
+    return sanitized, None, None
+
+
+def _sanitize_sector_momentum_row(row):
+    sector = row[0]
+    etf = row[1]
+    horizons = {
+        'return_20d': row[2],
+        'return_63d': row[3],
+        'return_252d': row[4],
+    }
+    sector_payload = {
+        'sector': sector,
+        'etf': etf,
+        'rank': row[5],
+    }
+    diagnostics = []
+    for field, raw_value in horizons.items():
+        sanitized, invalid_reason, outlier_reason = _sanitize_return_value(raw_value)
+        sector_payload[field] = sanitized
+        if invalid_reason:
+            diagnostics.append({
+                'sector': sector,
+                'symbol': etf,
+                'horizon': field.replace('return_', ''),
+                'current_price': None,
+                'base_price': None,
+                'latest_price_date': None,
+                'lookback_date': None,
+                'raw_return': safe_float(raw_value),
+                'invalid_reason': invalid_reason,
+                'outlier_reason': outlier_reason,
+                'data_source': 'sector_momentum',
+            })
+    return sector_payload, diagnostics
+
+
+def _load_sector_momentum_payload(conn):
+    if not _table_exists(conn, 'sector_momentum'):
+        return None
+
+    latest = conn.execute(text(
+        "SELECT MAX(report_date) FROM sector_momentum"
+    )).scalar()
+    if not latest:
+        return None
+
+    etf_col = 'etf_symbol' if _column_exists(conn, 'sector_momentum', 'etf_symbol') else 'etf'
+    rows = conn.execute(text(f"""
+        SELECT sector, {etf_col}, return_20d, return_63d, return_252d, rank_position
+        FROM sector_momentum
+        WHERE report_date = :d
+        ORDER BY rank_position ASC
+    """), {'d': str(latest)})
+
+    sectors = []
+    diagnostics = []
+    for row in rows:
+        sector_payload, row_diagnostics = _sanitize_sector_momentum_row(row)
+        sectors.append(sector_payload)
+        diagnostics.extend(row_diagnostics)
+
+    payload = {
+        'report_date': str(latest),
+        'sectors': sectors,
+        'diagnostics': diagnostics,
+        'has_unavailable_momentum': bool(diagnostics),
+    }
+    if diagnostics:
+        payload['warning'] = 'Some macro or sector momentum values are unavailable'
+    return payload
+
+
+def _recommendation_swing_metadata(row):
+    return normalize_swing_ranking_metadata(
+        row.get('strategy_details') if hasattr(row, 'get') else None,
+        fallback_score=float(row['total_score']) if row.get('total_score') else None,
+        rank=int(row['rank_position']) if row.get('rank_position') is not None else None,
+    )
+def _empty_swing_performance_payload():
+    payload = build_performance_payload([])
+    payload["calibration"] = build_calibration_status(load_active_calibration_profile())
+    return payload
+
+
+def _load_swing_performance_payload(conn, limit=500, recent_limit=50):
+    if not _table_exists(conn, 'swing_ranking_performance'):
+        return _empty_swing_performance_payload()
+    rows = load_swing_performance_rows(conn, limit=limit)
+    payload = build_performance_payload(rows, recent_limit=recent_limit)
+    payload["calibration"] = build_calibration_status(load_active_calibration_profile())
+    return payload
+
+
+def _empty_calibration_drift_payload():
+    report = build_drift_report([], active_profile=load_active_calibration_profile())
+    report["recent_audit_events"] = []
+    report["rollback_available"] = False
+    report["rollback_profiles"] = []
+    return report
+
+
+def _load_calibration_drift_payload(conn, limit=500):
+    rows = []
+    if _table_exists(conn, 'swing_ranking_performance'):
+        rows = load_swing_performance_rows(conn, limit=limit)
+    report = build_drift_report(rows, active_profile=load_active_calibration_profile())
+    report["recent_audit_events"] = read_recent_calibration_audit_events(conn, limit=10)
+    backups = list_calibration_profile_backups()
+    report["rollback_profiles"] = backups
+    report["rollback_available"] = bool(backups)
+    return report
+
+
+def _load_latest_provider_health(conn):
+    if not _table_exists(conn, 'provider_health_log'):
+        return _empty_provider_health_contract()
+
+    row = conn.execute(text("""
+        SELECT *
+        FROM provider_health_log
+        ORDER BY run_at DESC, id DESC
+        LIMIT 1
+    """)).mappings().first()
+
+    if not row:
+        return _empty_provider_health_contract()
+
+    return normalize_provider_health(dict(row))
+
+
+def _load_provider_health_history(conn, limit=20):
+    safe_limit = min(max(int(limit or 20), 1), 100)
+    if not _table_exists(conn, 'provider_health_log'):
+        return []
+
+    rows = conn.execute(text(f"""
+        SELECT *
+        FROM provider_health_log
+        ORDER BY run_at DESC, id DESC
+        LIMIT {safe_limit}
+    """)).mappings()
+    return [normalize_provider_health(dict(row)) for row in rows]
+
+
+def _recommendation_metadata(provider_health):
+    provider_health = normalize_provider_health(provider_health)
+    return {
+        'recommendation_source': provider_health.get('recommendation_source'),
+        'is_using_last_valid_snapshot': bool(provider_health.get('is_using_last_valid_snapshot')),
+        'last_valid_recommendation_at': provider_health.get('last_valid_recommendation_at'),
+        'current_run_status': provider_health.get('current_run_status') or provider_health.get('status'),
+        'current_run_coverage': provider_health.get('current_run_coverage', provider_health.get('coverage')),
+        'provider_diagnostics': provider_health.get('diagnostics') or {},
+    }
+
+
+def _is_provider_health_degraded(provider_health):
+    if not provider_health:
+        return False
+    provider_health = normalize_provider_health(provider_health)
+    status = provider_health.get('status')
+    mode = provider_health.get('current_data_mode')
+    coverage = provider_health.get('provider_coverage_ratio')
+    minimum = provider_health.get('minimum_coverage_ratio')
+    return (
+        status in {'degraded', 'stale', 'failed', 'critical'}
+        or
+        mode in PROVIDER_HEALTH_DEGRADED_MODES
+        or provider_health.get('stale_data_used')
+        or (coverage is not None and minimum is not None and coverage < minimum)
+    )
 
 
 def _build_empty_correlation_payload(reason: str = ""):
@@ -393,7 +621,8 @@ def get_strategies():
                     'total_return': float(row[4]) if row[4] else 0,
                     'sharpe_ratio': float(row[5]) if row[5] else 0,
                     'max_drawdown': float(row[6]) if row[6] else 0,
-                    'created_at': row[7].strftime('%Y-%m-%d %H:%M:%S') if row[7] else None
+                    'created_at': row[7].strftime('%Y-%m-%d %H:%M:%S') if row[7] else None,
+                    'diagnostics': _build_backtest_diagnostics(start_date=row[2], end_date=row[3]),
                 })
             
             return jsonify(strategies)
@@ -474,13 +703,20 @@ def get_trades(run_id):
             
             trades = []
             for row in result:
+                entry_date = str(row[1]) if row[1] else None
+                exit_date = str(row[2]) if row[2] else None
+                entry_price = float(row[3]) if row[3] else None
+                exit_price = float(row[4]) if row[4] else None
                 trades.append({
                     'symbol': row[0],
-                    'entry_date': str(row[1]) if row[1] else None,
-                    'exit_date': str(row[2]) if row[2] else None,
-                    'entry_price': float(row[3]) if row[3] else 0,
-                    'exit_price': float(row[4]) if row[4] else 0,
-                    'pnl': float(row[5]) if row[5] else 0
+                    'entry_date': entry_date,
+                    'exit_date': exit_date,
+                    'holding_days': _holding_days(entry_date, exit_date),
+                    'entry_price': entry_price,
+                    'exit_price': exit_price,
+                    'pnl': float(row[5]) if row[5] else 0,
+                    'return_pct': _return_pct(entry_price, exit_price),
+                    'exit_reason': 'closed' if exit_date else 'open_position',
                 })
             
             return jsonify(trades)
@@ -495,12 +731,14 @@ def health():
     try:
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
+            provider_health = _load_latest_provider_health(conn)
         
         return jsonify({
             'status': 'healthy',
             'timestamp': datetime.now().isoformat(),
             'database': 'connected',
-            'line_bot': 'enabled'
+            'line_bot': 'enabled',
+            'provider_health': provider_health,
         })
     except Exception as e:
         return jsonify({
@@ -509,6 +747,133 @@ def health():
             'database': 'disconnected',
             'error': str(e)
         }), 500
+
+
+@app.route('/api/provider-health/latest')
+@auth.login_required
+def get_provider_health_latest():
+    try:
+        with engine.connect() as conn:
+            return jsonify(_load_latest_provider_health(conn))
+    except Exception as e:
+        return _handle_dashboard_exception('provider_health_latest', _empty_provider_health_contract(), e)
+
+
+@app.route('/api/provider-health/history')
+@auth.login_required
+def get_provider_health_history():
+    try:
+        limit = request.args.get('limit', 20, type=int)
+        safe_limit = min(max(int(limit or 20), 1), 100)
+        with engine.connect() as conn:
+            rows = _load_provider_health_history(conn, limit=safe_limit)
+        return jsonify({'rows': rows, 'limit': safe_limit})
+    except Exception as e:
+        return _handle_dashboard_exception('provider_health_history', {'rows': [], 'limit': 20}, e)
+
+
+def _env_flag(name, default=False):
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+def _app_env_label():
+    explicit = (os.getenv('APP_ENV') or os.getenv('FLASK_ENV') or '').strip().lower()
+    if explicit in {'docker', 'local'}:
+        return explicit
+    if os.getenv('DOCKER_CONTAINER') or os.path.exists('/.dockerenv'):
+        return 'docker'
+    if (PROJECT_ROOT / '.venv').exists():
+        return 'local'
+    return explicit or 'unknown'
+
+
+def _db_host_label():
+    host = str(DB_CONFIG.get('host') or '').lower()
+    if host in {'mysql', 'db'}:
+        return 'mysql'
+    if host in {'localhost', '127.0.0.1'}:
+        return 'localhost'
+    return 'unknown'
+
+
+@app.route('/api/ops/runtime')
+@auth.login_required
+def get_ops_runtime():
+    db_connected = False
+    try:
+        with engine.connect() as conn:
+            conn.execute(text('SELECT 1'))
+            db_connected = True
+    except Exception:
+        db_connected = False
+    return jsonify({
+        'app_env': _app_env_label(),
+        'hostname': os.getenv('HOSTNAME') or os.getenv('COMPUTERNAME') or 'unknown',
+        'service_name': os.getenv('SERVICE_NAME', 'web'),
+        'db_connected': db_connected,
+        'db_host_label': _db_host_label(),
+        'linebot_enabled': bool(os.getenv('LINE_CHANNEL_ACCESS_TOKEN') or os.getenv('LINE_CHANNEL_SECRET')),
+        'scheduler_enabled': _env_flag('USE_SCHEDULER', False),
+        'profile_path_configured': bool(os.getenv('SWING_CALIBRATION_PROFILE_PATH') or os.getenv('CALIBRATION_PROFILE_PATH')),
+    })
+
+
+@app.route('/api/ops/scheduler')
+@auth.login_required
+def get_ops_scheduler():
+    scheduler_enabled = _env_flag('USE_SCHEDULER', False)
+    try:
+        with engine.connect() as conn:
+            latest_pull = load_latest_market_data_pull(conn)
+    except Exception as error:
+        app.logger.warning('scheduler status unavailable: %s', error)
+        latest_pull = None
+
+    if not scheduler_enabled and not latest_pull:
+        return jsonify({
+            'scheduler_enabled': False,
+            'message': 'No scheduler service detected',
+        })
+
+    payload = {
+        'scheduler_enabled': scheduler_enabled,
+        'message': None if scheduler_enabled else 'No scheduler service detected',
+        'last_market_data_pull': latest_pull,
+        'last_status': latest_pull.get('status') if latest_pull else None,
+        'last_error_type': latest_pull.get('error_type') if latest_pull else None,
+        'rows_updated': latest_pull.get('rows_updated') if latest_pull else 0,
+        'symbols_updated': latest_pull.get('symbols_updated') if latest_pull else 0,
+        'next_run': os.getenv('SCHEDULER_NEXT_RUN'),
+    }
+    return jsonify(payload)
+
+
+@app.route('/api/swing-performance')
+@auth.login_required
+def get_swing_performance():
+    try:
+        limit = request.args.get('limit', 500, type=int)
+        recent_limit = request.args.get('recent_limit', 50, type=int)
+        with engine.connect() as conn:
+            payload = _load_swing_performance_payload(conn, limit=limit, recent_limit=recent_limit)
+        return jsonify(payload)
+    except Exception as e:
+        return _handle_dashboard_exception('swing_performance', _empty_swing_performance_payload(), e)
+
+
+@app.route('/api/swing-calibration/drift')
+@auth.login_required
+def get_swing_calibration_drift():
+    try:
+        limit = request.args.get('limit', 500, type=int)
+        with engine.connect() as conn:
+            payload = _load_calibration_drift_payload(conn, limit=limit)
+        return jsonify(payload)
+    except Exception as e:
+        return _handle_dashboard_exception('swing_calibration_drift', _empty_calibration_drift_payload(), e)
 
 
 # ============================================
@@ -618,8 +983,10 @@ def get_recommendations():
 
     try:
         with engine.connect() as conn:
+            provider_health = _load_latest_provider_health(conn)
+            metadata = _recommendation_metadata(provider_health)
             if not _table_exists(conn, 'daily_recommendations'):
-                return jsonify(empty_payload)
+                return jsonify({**empty_payload, 'provider_health': provider_health, **metadata})
 
             enhanced_exprs = []
             for col in [
@@ -646,7 +1013,7 @@ def get_recommendations():
                     "SELECT MAX(scan_date) FROM daily_recommendations"
                 )).scalar()
                 if not latest:
-                    return jsonify(empty_payload)
+                    return jsonify({**empty_payload, 'provider_health': provider_health, **metadata})
                 date_filter = "scan_date = :target_date"
                 params = {'target_date': str(latest), 'limit': limit}
 
@@ -665,15 +1032,18 @@ def get_recommendations():
                 LIMIT :limit
             """)
 
-            result = conn.execute(query, params).mappings()
+            result_obj = conn.execute(query, params)
+            result = result_obj.mappings() if hasattr(result_obj, 'mappings') else result_obj
             recs = []
             for row in result:
+                swing_metadata = _recommendation_swing_metadata(row)
                 recs.append({
                     'scan_date': str(row['scan_date']),
                     'symbol': row['symbol'],
                     'rank': row['rank_position'],
                     'signal': row['signal_type'],
                     'total_score': float(row['total_score']) if row['total_score'] else 0,
+                    **swing_metadata,
                     'breakout_pass': bool(row['breakout_pass']),
                     'acceleration_pass': bool(row['acceleration_pass']),
                     'peg_pass': bool(row['peg_pass']),
@@ -699,7 +1069,14 @@ def get_recommendations():
                     'created_at': row['created_at'].strftime('%Y-%m-%d %H:%M:%S') if row['created_at'] else None,
                 })
 
-            return jsonify({'recommendations': recs})
+            stale_or_degraded = _is_provider_health_degraded(provider_health)
+            return jsonify({
+                'recommendations': recs,
+                'provider_health': provider_health,
+                'stale_or_degraded': stale_or_degraded,
+                'data_mode': provider_health.get('current_data_mode') if provider_health else 'unknown',
+                **metadata,
+            })
 
     except Exception as e:
         return _handle_dashboard_exception('recommendations', empty_payload, e)
@@ -737,6 +1114,23 @@ def _format_trade_date(value):
         except Exception:
             pass
     return str(value)[:10]
+
+
+def _holding_days(entry_date, exit_date):
+    if not entry_date or not exit_date:
+        return None
+    try:
+        return max((pd.to_datetime(exit_date) - pd.to_datetime(entry_date)).days, 0)
+    except Exception:
+        return None
+
+
+def _return_pct(entry_price, exit_price):
+    entry = _to_float(entry_price)
+    exit_value = _to_float(exit_price)
+    if entry is None or exit_value is None or entry <= 0:
+        return None
+    return (exit_value - entry) / entry
 
 
 def _format_signed_number(value):
@@ -1078,12 +1472,77 @@ def _snapshot_backtest_job_state():
     with _backtest_job_lock:
         state = dict(_backtest_job_state)
         state['output_tail'] = list(_backtest_job_state.get('output_tail', []))
+        state['diagnostics'] = state.get('diagnostics') or _empty_backtest_diagnostics()
         return state
 
 
 def _update_backtest_job_state(**updates):
     with _backtest_job_lock:
         _backtest_job_state.update(updates)
+
+
+def _empty_backtest_diagnostics():
+    return {
+        'data_start': None,
+        'data_end': None,
+        'price_rows': 0,
+        'trade_count': 0,
+        'last_trade_date': None,
+        'last_signal_date': None,
+        'equity_flat_after': None,
+        'flat_reason': None,
+        'symbols_missing_data': [],
+        'warnings': [],
+    }
+
+
+def _build_backtest_diagnostics(
+    *,
+    start_date=None,
+    end_date=None,
+    equity_df=None,
+    trade_rows=None,
+    requested_symbols=None,
+    symbols_with_data=None,
+):
+    diagnostics = _empty_backtest_diagnostics()
+    diagnostics['data_start'] = str(start_date) if start_date else None
+    diagnostics['data_end'] = str(end_date) if end_date else None
+    trade_rows = trade_rows or []
+    requested_symbols = [str(symbol).upper() for symbol in (requested_symbols or []) if symbol]
+    symbols_with_data = set(str(symbol).upper() for symbol in (symbols_with_data or requested_symbols) if symbol)
+
+    if equity_df is not None and not getattr(equity_df, 'empty', True):
+        diagnostics['price_rows'] = int(len(equity_df))
+        date_col = 'date' if 'date' in equity_df.columns else None
+        if date_col:
+            diagnostics['data_start'] = str(pd.to_datetime(equity_df[date_col].iloc[0]).date())
+            diagnostics['data_end'] = str(pd.to_datetime(equity_df[date_col].iloc[-1]).date())
+
+        value_col = 'total_equity' if 'total_equity' in equity_df.columns else 'equity_value' if 'equity_value' in equity_df.columns else None
+        if value_col and len(equity_df[value_col].dropna().unique()) == 1:
+            diagnostics['equity_flat_after'] = diagnostics['data_start']
+            diagnostics['flat_reason'] = 'no_trades' if not trade_rows else 'no_new_trades'
+
+    diagnostics['trade_count'] = len(trade_rows)
+    exit_dates = [row.get('exit_date') for row in trade_rows if isinstance(row, dict) and row.get('exit_date')]
+    entry_dates = [row.get('entry_date') for row in trade_rows if isinstance(row, dict) and row.get('entry_date')]
+    if exit_dates:
+        diagnostics['last_trade_date'] = str(max(exit_dates))
+    if entry_dates:
+        diagnostics['last_signal_date'] = str(max(entry_dates))
+
+    missing = sorted(set(requested_symbols) - symbols_with_data) if requested_symbols else []
+    diagnostics['symbols_missing_data'] = missing
+    if diagnostics['trade_count'] == 0:
+        diagnostics['warnings'].append('Backtest completed with no trades.')
+    if missing:
+        diagnostics['warnings'].append(f"Backtest may be incomplete because price data is missing for: {', '.join(missing)}")
+    if diagnostics['equity_flat_after'] and diagnostics['flat_reason']:
+        diagnostics['warnings'].append(
+            f"Equity flat after {diagnostics['equity_flat_after']} because the strategy had no open positions or no new trades."
+        )
+    return diagnostics
 
 
 def _fetch_latest_backtest_run_metadata():
@@ -1189,6 +1648,9 @@ def _build_backtest_trade_rows(portfolio):
             'entry_price': buy_event['entry_price'],
             'exit_price': _to_float(event.get('price')),
             'pnl': pnl,
+            'holding_days': _holding_days(buy_event['entry_date'], _format_trade_date(event.get('date'))),
+            'return_pct': _return_pct(buy_event['entry_price'], _to_float(event.get('price'))),
+            'exit_reason': str(event.get('reason') or 'closed'),
         })
 
     for open_event in open_positions.values():
@@ -1199,6 +1661,9 @@ def _build_backtest_trade_rows(portfolio):
             'entry_price': open_event['entry_price'],
             'exit_price': None,
             'pnl': None,
+            'holding_days': None,
+            'return_pct': None,
+            'exit_reason': 'open_position',
         })
 
     return trade_rows
@@ -1298,6 +1763,15 @@ def _run_oneclick_backtest_job(job_config):
             f"最大回撤: {metrics.get('max_drawdown', 0.0):+.2%}",
             f"夏普值: {metrics.get('sharpe', 0.0):.2f}",
         ]
+        trade_rows = _build_backtest_trade_rows(portfolio)
+        diagnostics = _build_backtest_diagnostics(
+            start_date=start_date.strftime('%Y-%m-%d'),
+            end_date=end_date.strftime('%Y-%m-%d'),
+            equity_df=equity_df,
+            trade_rows=trade_rows,
+            requested_symbols=symbols,
+            symbols_with_data=symbols if not equity_df.empty else [],
+        )
         _update_backtest_job_state(
             status='completed',
             message=f'表單回測完成（{request_summary}）',
@@ -1305,6 +1779,7 @@ def _run_oneclick_backtest_job(job_config):
             last_run_id=last_run_id,
             last_strategy_name=last_strategy_name,
             output_tail=output_tail,
+            diagnostics=diagnostics,
         )
     except Exception as error:
         app.logger.exception('Dashboard backtest failed: %s', error)
@@ -1313,6 +1788,7 @@ def _run_oneclick_backtest_job(job_config):
             message=f'表單回測執行失敗: {error}',
             finished_at=datetime.utcnow().isoformat(timespec='seconds'),
             output_tail=[str(error)],
+            diagnostics=_empty_backtest_diagnostics(),
         )
 
 
@@ -2187,6 +2663,7 @@ def run_backtest_once():
             'last_run_id': _backtest_job_state.get('last_run_id'),
             'last_strategy_name': _backtest_job_state.get('last_strategy_name'),
             'output_tail': [],
+            'diagnostics': _empty_backtest_diagnostics(),
         })
 
     worker = threading.Thread(target=_run_oneclick_backtest_job, args=(job_config,), daemon=True)
@@ -2451,6 +2928,28 @@ def get_macro():
         return _handle_dashboard_exception('macro', empty_payload, e)
 
 
+@app.route('/api/macro/diagnostics')
+@auth.login_required
+def get_macro_diagnostics():
+    empty_payload = {
+        'status': 'unavailable',
+        'sector_momentum': [],
+        'warning': 'macro diagnostics unavailable',
+    }
+    try:
+        with engine.connect() as conn:
+            sector_payload = _load_sector_momentum_payload(conn) or {}
+            diagnostics = sector_payload.get('diagnostics') or []
+            return jsonify({
+                'status': 'ok',
+                'sector_momentum': diagnostics,
+                'has_unavailable_momentum': bool(diagnostics),
+                'warning': sector_payload.get('warning'),
+            })
+    except Exception as e:
+        return _handle_dashboard_exception('macro_diagnostics', empty_payload, e)
+
+
 # ============================================
 # 產業動能 API
 # ============================================
@@ -2467,40 +2966,17 @@ def get_sectors():
 
     try:
         with engine.connect() as conn:
-            if _table_exists(conn, 'sector_momentum'):
-                latest = conn.execute(text(
-                    "SELECT MAX(report_date) FROM sector_momentum"
-                )).scalar()
-
-                if latest:
-                    etf_col = 'etf_symbol' if _column_exists(conn, 'sector_momentum', 'etf_symbol') else 'etf'
-                    rows = conn.execute(text(f"""
-                        SELECT sector, {etf_col}, return_20d, return_63d, return_252d, rank_position
-                        FROM sector_momentum
-                        WHERE report_date = :d
-                        ORDER BY rank_position ASC
-                    """), {'d': str(latest)})
-
-                    sectors = []
-                    for row in rows:
-                        sectors.append({
-                            'sector':      row[0],
-                            'etf':         row[1],
-                            'return_20d':  float(row[2]) if row[2] else None,
-                            'return_63d':  float(row[3]) if row[3] else None,
-                            'return_252d': float(row[4]) if row[4] else None,
-                            'rank':        row[5],
-                        })
-
-                    return jsonify({'report_date': str(latest), 'sectors': sectors})
+            sector_payload = _load_sector_momentum_payload(conn)
+            if sector_payload:
+                return jsonify(sector_payload)
 
             # Fallback: 若無 sector_momentum，使用最新推薦聚合
             if not _table_exists(conn, 'daily_recommendations'):
-                return jsonify({'report_date': None, 'sectors': []})
+                return jsonify({'report_date': None, 'sectors': [], 'diagnostics': [], 'has_unavailable_momentum': False})
 
             latest_scan = conn.execute(text("SELECT MAX(scan_date) FROM daily_recommendations")).scalar()
             if not latest_scan:
-                return jsonify({'report_date': None, 'sectors': []})
+                return jsonify({'report_date': None, 'sectors': [], 'diagnostics': [], 'has_unavailable_momentum': False})
 
             sectors = []
             if _column_exists(conn, 'daily_recommendations', 'sector'):
@@ -2562,7 +3038,13 @@ def get_sectors():
                         'avg_score': round(stats['score_sum'] / max(stats['count'], 1), 4),
                     })
 
-            return jsonify({'report_date': str(latest_scan), 'sectors': sectors, 'source': 'daily_recommendations_fallback'})
+            return jsonify({
+                'report_date': str(latest_scan),
+                'sectors': sectors,
+                'source': 'daily_recommendations_fallback',
+                'diagnostics': [],
+                'has_unavailable_momentum': False,
+            })
 
     except Exception as e:
         return _handle_dashboard_exception('sectors', empty_payload, e)

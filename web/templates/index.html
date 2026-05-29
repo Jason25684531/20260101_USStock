@@ -180,16 +180,38 @@
                     <thead class="table-light">
                         <tr>
                             <th>#</th><th>股票</th><th>信號</th><th>評分</th>
-                            <th>突破</th><th>加速</th><th>PEG</th><th>杜邦</th>
-                            <th>籌碼</th><th>量價</th><th>資金流</th><th>多 TF</th>
-                            <th>RS</th><th>盈餘</th><th>產業</th>
-                            <th>ML</th><th>現價</th><th>支撐</th><th>壓力</th>
+                            <th>Setup</th><th>Trend</th><th>Momentum</th><th>Risk</th>
+                            <th>Reasons</th><th>Risk Flags</th>
+                            <th>現價</th><th>支撐</th><th>壓力</th><th>Source</th>
                         </tr>
                     </thead>
                     <tbody id="recBody">
-                        <tr><td colspan="19" class="text-center text-muted py-4">載入中...</td></tr>
+                        <tr><td colspan="14" class="text-center text-muted py-4">載入中...</td></tr>
                     </tbody>
                 </table>
+            </div>
+        </div>
+    </div>
+    <div class="card mt-3" id="swingPerformanceSection">
+        <div class="card-header card-header-green">Swing Ranking Performance</div>
+        <div class="card-body">
+            <div id="swingPerformanceSummary" class="row g-3"></div>
+            <div id="swingCalibrationStatus" class="small text-muted mt-2">Calibration loading...</div>
+            <div id="swingCalibrationDriftStatus" class="small text-muted mt-2">Calibration drift loading...</div>
+            <div id="swingCalibrationAuditLog" class="small text-muted mt-1"></div>
+            <div class="row g-3 mt-1">
+                <div class="col-lg-4">
+                    <div class="small fw-semibold mb-2">Top Groups</div>
+                    <div id="swingPerformanceRankGroups" class="small text-muted">Loading...</div>
+                </div>
+                <div class="col-lg-4">
+                    <div class="small fw-semibold mb-2">Score Buckets</div>
+                    <div id="swingPerformanceScoreBuckets" class="small text-muted">Loading...</div>
+                </div>
+                <div class="col-lg-4">
+                    <div class="small fw-semibold mb-2">Setup / Risk</div>
+                    <div id="swingPerformanceSetupRisk" class="small text-muted">Loading...</div>
+                </div>
             </div>
         </div>
     </div>
@@ -322,6 +344,10 @@
                 <div class="col-3"><div class="card stat-card"><div class="stat-label">最大回撤</div><div class="stat-value" id="btDrawdown">-</div></div></div>
                 <div class="col-3"><div class="card stat-card"><div class="stat-label">策略名稱</div><div class="stat-value" id="btName" style="font-size:1rem;">-</div></div></div>
             </div>
+            <div class="card mb-3" id="backtestDiagnosticsPanel">
+                <div class="card-header card-header-dark">Backtest Diagnostics</div>
+                <div class="card-body small" id="backtestDiagnosticsBody">No diagnostics yet.</div>
+            </div>
             <div class="card">
                 <div class="card-header card-header-blue">權益曲線</div>
                 <div class="card-body chart-container"><canvas id="equityChart"></canvas></div>
@@ -332,10 +358,10 @@
                     <div class="table-responsive table-container">
                         <table class="table table-sm table-striped mb-0">
                             <thead class="table-light">
-                                <tr><th>股票</th><th>入場日</th><th>出場日</th><th>入場價</th><th>出場價</th><th>損益</th></tr>
+                                <tr><th>股票</th><th>入場日</th><th>出場日</th><th>天數</th><th>入場價</th><th>出場價</th><th>損益</th><th>報酬</th><th>Exit</th></tr>
                             </thead>
                             <tbody id="btTradesBody">
-                                <tr><td colspan="6" class="text-center text-muted">選擇左側回測</td></tr>
+                                <tr><td colspan="9" class="text-center text-muted">選擇左側回測</td></tr>
                             </tbody>
                         </table>
                     </div>
@@ -378,6 +404,7 @@
                     <thead class="table-light">
                         <tr><th>排名</th><th>產業</th><th>ETF</th><th>20 日</th><th>63 日</th><th>252 日</th></tr>
                     </thead>
+                    <caption id="macroUnavailableWarning" class="text-warning d-none px-3 py-2">Some macro or sector momentum values are unavailable.</caption>
                     <tbody id="sectorBody">
                         <tr><td colspan="6" class="text-center text-muted py-3">載入中...</td></tr>
                     </tbody>
@@ -417,6 +444,9 @@
         <div class="card-body">
             <table class="table table-sm">
                 <tr><th style="width:200px">系統狀態</th><td id="sysHealth" class="positive">檢測中...</td></tr>
+                <tr><th>Data Health</th><td id="sysDataHealth">-</td></tr>
+                <tr><th>Data Health Detail</th><td id="sysDataHealthDetail" class="small text-muted">-</td></tr>
+                <tr><th>Provider Incident</th><td><div id="providerHealthIncidentMessage" class="small text-muted">目前資料供應狀態檢查中</div><div id="providerHealthOperatorActions" class="small text-muted mt-1">-</div></td></tr>
                 <tr><th>資料庫連線</th><td id="sysDb">-</td></tr>
                 <tr><th>LINE Bot</th><td id="sysLine">-</td></tr>
                 <tr><th>最新推薦日期</th><td id="sysLatestRec">-</td></tr>
@@ -493,6 +523,7 @@ document.addEventListener('DOMContentLoaded', () => {
     renderWarRoomEmptyState('請輸入股票代碼，或從推薦列表點選一檔股票同步觀察');
     loadRecDates();
     loadRecommendations();
+    loadSwingPerformance();
     loadPortfolio();
     loadPortfolioAnalytics();
     loadBacktestList();
@@ -508,6 +539,7 @@ document.addEventListener('DOMContentLoaded', () => {
 // Auto-refresh
 setInterval(() => {
     loadRecommendations();
+    loadSwingPerformance();
     loadPortfolio();
     loadPortfolioAnalytics();
     loadUniverseSyncStatus();
@@ -522,6 +554,7 @@ const pass = v => v === null || v === undefined
     : (v ? '<span class="badge-pass">✓</span>' : '<span class="badge-fail">✗</span>');
 const fmt = (v, d=2) => v != null ? Number(v).toFixed(d) : '-';
 const pct = (v, d=1) => v != null ? (Number(v)*100).toFixed(d)+'%' : '-';
+const pctOrNA = (v, d=1) => v != null && Number.isFinite(Number(v)) ? (Number(v)*100).toFixed(d)+'%' : 'N/A';
 const dollar = v => v != null ? '$'+Number(v).toFixed(2) : '-';
 const esc = v => String(v ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
 
@@ -1194,44 +1227,176 @@ async function loadRecommendations() {
         syncBackendStatus('recommendations', data, '推薦資料暫時不可用');
         const tbody = document.getElementById('recBody');
         const recs = data.recommendations || data || [];
+        const recommendationSource = data.recommendation_source || data.provider_health?.recommendation_source || 'current_run';
+        const providerIncident = data.provider_diagnostics || data.provider_health?.diagnostics || {};
 
         if (!warRoomState.initialized && recs.length) {
             fetchStockWarRoom(recs[0].symbol);
         }
 
         if (!recs.length) {
-            tbody.innerHTML = '<tr><td colspan="19" class="text-center text-muted py-4">該日無推薦</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="14" class="text-center text-muted py-4">該日無推薦</td></tr>';
             return;
         }
 
         tbody.innerHTML = recs.map(r => {
             const sigClass = r.signal === 'BUY' ? 'positive' : 'negative';
-            const ml = r.ml_confidence != null ? pct(r.ml_confidence, 0) : '-';
+            const boundedReasons = Array.isArray(r.reasons) ? r.reasons.slice(0, 3).map(x => String(x).slice(0, 72)).join(' / ') : '';
+            const boundedRiskFlags = Array.isArray(r.risk_flags) ? r.risk_flags.slice(0, 3).map(x => String(x).slice(0, 48)).join(' / ') : '';
+            const advancedFlags = [
+                ['Breakout', r.breakout_pass],
+                ['Accel', r.acceleration_pass],
+                ['PEG', r.peg_pass],
+                ['DuPont', r.dupont_pass],
+                ['Inst', r.institutional_pass],
+                ['Vol', r.volume_structure_pass],
+                ['Flow', r.money_flow_pass],
+                ['MultiTF', r.multi_tf_momentum_pass],
+                ['RS', r.relative_strength_pass],
+                ['Earnings', r.earnings_quality_pass],
+                ['Sector', r.sector_rotation_pass],
+                ['ML', r.ml_confidence != null ? pct(r.ml_confidence, 0) : null],
+            ].map(([label, value]) => `<span class="badge bg-secondary me-1">${label}:${typeof value === 'string' ? esc(value) : pass(value)}</span>`).join('');
+            const sourceTone = recommendationSource === 'last_valid_snapshot' || providerIncident.snapshot_preserved ? 'text-warning' : 'text-muted';
             return `<tr class="clickable-row" onclick="openStockModal('${r.symbol}'); syncWarRoomFromSymbol('${r.symbol}')">
                 <td><strong>${r.rank}</strong></td>
                 <td><strong>${r.symbol}</strong></td>
                 <td class="${sigClass}">${r.signal || '-'}</td>
                 <td>${fmt(r.total_score)}</td>
-                <td>${pass(r.breakout_pass)}</td>
-                <td>${pass(r.acceleration_pass)}</td>
-                <td>${pass(r.peg_pass)}</td>
-                <td>${pass(r.dupont_pass)}</td>
-                <td>${pass(r.institutional_pass)}</td>
-                <td>${pass(r.volume_structure_pass)}</td>
-                <td>${pass(r.money_flow_pass)}</td>
-                <td>${pass(r.multi_tf_momentum_pass)}</td>
-                <td>${pass(r.relative_strength_pass)}</td>
-                <td>${pass(r.earnings_quality_pass)}</td>
-                <td>${pass(r.sector_rotation_pass)}</td>
-                <td>${ml}</td>
+                <td>${esc(r.setup_type || '-')}</td>
+                <td>${fmt(r.trend_score, 1)}</td>
+                <td>${fmt(r.momentum_score, 1)}</td>
+                <td>${fmt(r.risk_score, 1)}</td>
+                <td class="small text-wrap" title="${esc((r.reasons || []).join(' / '))}">${esc(boundedReasons || '-')}</td>
+                <td class="small text-warning fw-semibold" title="${esc((r.risk_flags || []).join(' / '))}">${esc(boundedRiskFlags || '-')}</td>
                 <td>${dollar(r.current_price)}</td>
                 <td>${dollar(r.support_1)}</td>
                 <td>${dollar(r.resistance_1)}</td>
+                <td class="small ${sourceTone}">${esc(recommendationSource)}</td>
+            </tr>
+            <tr class="rec-advanced-flags">
+                <td colspan="14" class="small text-muted">
+                    <span class="fw-semibold">Advanced flags</span>
+                    ${advancedFlags}
+                </td>
             </tr>`;
         }).join('');
     } catch(e) {
         console.error(e);
-        document.getElementById('recBody').innerHTML = '<tr><td colspan="19" class="text-center text-danger">載入失敗</td></tr>';
+        document.getElementById('recBody').innerHTML = '<tr><td colspan="14" class="text-center text-danger">載入失敗</td></tr>';
+    }
+}
+
+function metricCard(label, value, className='') {
+    return `<div class="col-md-3 col-6"><div class="stat-card"><div class="stat-label">${label}</div><div class="stat-value ${className}">${value}</div></div></div>`;
+}
+
+function renderMetricList(items, labelKey, valueKey='avg_forward_return_20d') {
+    if (!items || !items.length) return '<div class="text-muted">No data</div>';
+    return items.slice(0, 5).map(item => {
+        const label = esc(item[labelKey] || item.group || 'unknown');
+        const value = item[valueKey] == null ? 'N/A' : pct(item[valueKey]);
+        const sample = item.sample_size || 0;
+        return `<div class="d-flex justify-content-between border-bottom py-1"><span>${label}</span><span>${value} <span class="text-muted">n=${sample}</span></span></div>`;
+    }).join('');
+}
+
+function renderSwingCalibrationStatus(calibration) {
+    const el = document.getElementById('swingCalibrationStatus');
+    if (!el) return;
+    const status = calibration?.status || 'inactive';
+    const sample = calibration?.source_sample_size || 0;
+    const version = calibration?.active_profile_version || calibration?.version || 'default';
+    if (status === 'active') {
+        const adjustments = calibration?.adjustments?.setup_adjustments || [];
+        const topAdjustment = adjustments.length ? ` | ${esc(adjustments[0].setup_type || 'setup')}: ${fmt(adjustments[0].adjustment, 1)}` : '';
+        el.textContent = `Calibration active: ${version} | sample=${sample}${topAdjustment}`;
+        el.className = 'small positive mt-2';
+    } else if (status === 'insufficient_data') {
+        el.textContent = `Calibration insufficient: sample=${sample} / required=${calibration?.min_sample_size || '-'}`;
+        el.className = 'small text-warning mt-2';
+    } else if (status === 'fallback_to_default') {
+        el.textContent = `Calibration fallback: default profile (${calibration?.fallback_reason || 'invalid profile'})`;
+        el.className = 'small text-warning mt-2';
+    } else {
+        el.textContent = 'Calibration inactive: default profile';
+        el.className = 'small text-muted mt-2';
+    }
+}
+
+function renderSwingCalibrationDrift(report) {
+    const statusEl = document.getElementById('swingCalibrationDriftStatus');
+    const auditEl = document.getElementById('swingCalibrationAuditLog');
+    if (!statusEl) return;
+    const status = report?.drift_status || 'insufficient_data';
+    const version = report?.active_profile_version || report?.profile_version || 'default';
+    const sample = report?.sample_size || 0;
+    const scoreBucket = report?.score_bucket_status || 'insufficient_data';
+    const topRank = report?.top_rank_status || 'insufficient_data';
+    const riskFlag = report?.risk_flag_status || 'insufficient_data';
+    const impact = report?.calibration_impact_status || 'insufficient_data';
+    const messages = (report?.messages || []).slice(0, 2).join(' ');
+    statusEl.textContent = `Calibration drift: ${status} | version=${version} | sample=${sample} | score=${scoreBucket} | top5=${topRank} | risk=${riskFlag} | impact=${impact}${messages ? ' | ' + messages : ''}`;
+    statusEl.className = status === 'healthy'
+        ? 'small positive mt-2'
+        : status === 'warning' || status === 'drifted'
+            ? 'small text-warning mt-2'
+            : 'small text-muted mt-2';
+    if (auditEl) {
+        const events = report?.recent_audit_events || [];
+        const auditText = events.length
+            ? events.slice(0, 3).map(event => `${event.event_type || 'event'}:${event.profile_version || 'default'}`).join(' | ')
+            : 'Calibration audit log: no recent events';
+        const rollback = report?.rollback_available ? ' | rollback backups available' : '';
+        auditEl.textContent = `${auditText}${rollback}`;
+    }
+}
+
+async function loadSwingCalibrationDrift() {
+    try {
+        const resp = await fetch('/api/swing-calibration/drift');
+        const data = await resp.json();
+        renderSwingCalibrationDrift(data || {});
+    } catch(e) {
+        const statusEl = document.getElementById('swingCalibrationDriftStatus');
+        if (statusEl) {
+            statusEl.textContent = 'Calibration drift unavailable';
+            statusEl.className = 'small text-muted mt-2';
+        }
+        console.error(e);
+    }
+}
+
+async function loadSwingPerformance() {
+    const summaryEl = document.getElementById('swingPerformanceSummary');
+    if (!summaryEl) return;
+    try {
+        const resp = await fetch('/api/swing-performance');
+        const data = await resp.json();
+        renderSwingCalibrationStatus(data.calibration || {});
+        loadSwingCalibrationDrift();
+        const summary = data.summary || {};
+        if (!summary.sample_size) {
+            summaryEl.innerHTML = '<div class="col-12 text-muted">Swing ranking performance data is not available yet.</div>';
+            document.getElementById('swingPerformanceRankGroups').innerHTML = '<div class="text-muted">No data</div>';
+            document.getElementById('swingPerformanceScoreBuckets').innerHTML = '<div class="text-muted">No data</div>';
+            document.getElementById('swingPerformanceSetupRisk').innerHTML = '<div class="text-muted">No data</div>';
+            return;
+        }
+        summaryEl.innerHTML = [
+            metricCard('Sample', summary.sample_size || 0),
+            metricCard('Avg 5D', pct(summary.avg_forward_return_5d), summary.avg_forward_return_5d >= 0 ? 'positive' : 'negative'),
+            metricCard('Avg 20D', pct(summary.avg_forward_return_20d), summary.avg_forward_return_20d >= 0 ? 'positive' : 'negative'),
+            metricCard('Hit 20D', pct(summary.hit_rate_20d)),
+        ].join('');
+        document.getElementById('swingPerformanceRankGroups').innerHTML = renderMetricList(data.rank_groups || [], 'group');
+        document.getElementById('swingPerformanceScoreBuckets').innerHTML = renderMetricList(data.score_buckets || [], 'bucket');
+        const setup = renderMetricList(data.setup_types || [], 'setup_type');
+        const risk = renderMetricList(data.risk_flags || [], 'group');
+        document.getElementById('swingPerformanceSetupRisk').innerHTML = `${setup}<div class="mt-2">${risk}</div>`;
+    } catch(e) {
+        summaryEl.innerHTML = '<div class="col-12 text-muted">Swing performance data unavailable.</div>';
+        console.error(e);
     }
 }
 
@@ -1652,6 +1817,31 @@ function renderBacktestStatus(state = {}) {
     statusEl.textContent = text;
     statusEl.className = `small ${status === 'failed' ? 'negative' : status === 'completed' ? 'positive' : 'text-muted'}`;
     buttonEl.disabled = status === 'running' || status === 'queued';
+    renderBacktestDiagnostics(state.diagnostics || {});
+}
+
+function renderBacktestDiagnostics(diagnostics = {}) {
+    const el = document.getElementById('backtestDiagnosticsBody');
+    if (!el) return;
+    const warnings = diagnostics.warnings || [];
+    const missing = diagnostics.symbols_missing_data || [];
+    const flatText = diagnostics.equity_flat_after
+        ? `Equity flat after ${diagnostics.equity_flat_after} because the strategy had no open positions or no new trades.`
+        : 'Equity curve active or not yet available.';
+    const missingText = missing.length
+        ? `Backtest may be incomplete because price data is missing for: ${missing.join(', ')}`
+        : 'No missing symbols reported.';
+    el.innerHTML = `
+        <div class="d-flex flex-wrap gap-3">
+            <span>Data: ${diagnostics.data_start || 'N/A'} ~ ${diagnostics.data_end || 'N/A'}</span>
+            <span>Rows: ${diagnostics.price_rows ?? 0}</span>
+            <span>Trades: ${diagnostics.trade_count ?? 0}</span>
+            <span>Last trade: ${diagnostics.last_trade_date || 'N/A'}</span>
+        </div>
+        <div class="mt-2 text-muted">${flatText}</div>
+        <div class="mt-1 ${missing.length ? 'text-warning' : 'text-muted'}" data-diagnostic="symbols_missing_data">${missingText}</div>
+        ${warnings.length ? `<div class="mt-2 text-warning">${warnings.map(esc).join(' | ')}</div>` : ''}
+    `;
 }
 
 function scheduleBacktestStatusPolling(status) {
@@ -1742,6 +1932,7 @@ async function selectBacktest(runId, el) {
         document.getElementById('btSharpe').textContent = s.sharpe_ratio.toFixed(2);
         document.getElementById('btDrawdown').textContent = (s.max_drawdown * 100).toFixed(2) + '%';
         document.getElementById('btName').textContent = s.strategy_name;
+        renderBacktestDiagnostics(s.diagnostics || {});
     }
 
     // Load equity
@@ -1762,10 +1953,10 @@ async function selectBacktest(runId, el) {
         const resp = await fetch(`/api/run/${runId}/trades`);
         const trades = await resp.json();
         const tbody = document.getElementById('btTradesBody');
-        if (!trades.length) { tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted">無交易</td></tr>'; return; }
+        if (!trades.length) { tbody.innerHTML = '<tr><td colspan="9" class="text-center text-muted">無交易</td></tr>'; return; }
         tbody.innerHTML = trades.map(t => {
             const cls = t.pnl >= 0 ? 'positive' : 'negative';
-            return `<tr><td>${t.symbol||'-'}</td><td>${t.entry_date||'-'}</td><td>${t.exit_date||'-'}</td><td>${dollar(t.entry_price)}</td><td>${dollar(t.exit_price)}</td><td class="${cls}">${dollar(t.pnl)}</td></tr>`;
+            return `<tr><td>${t.symbol||'-'}</td><td>${t.entry_date||'-'}</td><td>${t.exit_date||'-'}</td><td>${t.holding_days ?? '-'}</td><td>${dollar(t.entry_price)}</td><td>${dollar(t.exit_price)}</td><td class="${cls}">${dollar(t.pnl)}</td><td>${pctOrNA(t.return_pct)}</td><td>${esc(t.exit_reason || '-')}</td></tr>`;
         }).join('');
     } catch(e) { console.error(e); }
 }
@@ -1808,7 +1999,12 @@ async function loadSectors() {
         const data = await resp.json();
         syncBackendStatus('sectors', data, '產業資料暫時不可用');
         const tbody = document.getElementById('sectorBody');
+        const warningEl = document.getElementById('macroUnavailableWarning');
         const sectors = data.sectors || [];
+        if (warningEl) {
+            warningEl.classList.toggle('d-none', !data.has_unavailable_momentum);
+            warningEl.textContent = data.warning || 'Some macro or sector momentum values are unavailable.';
+        }
 
         if (!sectors.length) {
             tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-3">無產業數據</td></tr>';
@@ -1820,9 +2016,9 @@ async function loadSectors() {
                 <td>${s.rank || '-'}</td>
                 <td><strong>${s.sector}</strong></td>
                 <td>${s.etf || '-'}</td>
-                <td style="${heatColor(s.return_20d)}">${pct(s.return_20d)}</td>
-                <td style="${heatColor(s.return_63d)}">${pct(s.return_63d)}</td>
-                <td style="${heatColor(s.return_252d)}">${pct(s.return_252d)}</td>
+                <td style="${heatColor(s.return_20d)}">${pctOrNA(s.return_20d)}</td>
+                <td style="${heatColor(s.return_63d)}">${pctOrNA(s.return_63d)}</td>
+                <td style="${heatColor(s.return_252d)}">${pctOrNA(s.return_252d)}</td>
             </tr>
         `).join('');
     } catch(e) { console.error(e); }
@@ -1873,6 +2069,21 @@ async function loadSystemInfo() {
         document.getElementById('sysHealth').className = data.status === 'healthy' ? 'positive' : 'negative';
         document.getElementById('sysDb').textContent = data.database === 'connected' ? '🟢 已連接' : '🔴 斷線';
         document.getElementById('sysLine').textContent = data.line_bot === 'enabled' ? '🟢 啟用' : '⚪ 未啟用';
+        const providerHealth = data.provider_health || {};
+        const dataMode = providerHealth.current_data_mode || 'unknown';
+        const coverage = providerHealth.provider_coverage_ratio;
+        const badgeMap = {
+            live: ['Live', 'positive'],
+            fallback: ['Fallback', 'text-warning'],
+            stale: ['Stale', 'text-warning'],
+            failed: ['Failed', 'negative'],
+            unknown: ['Unknown', 'text-muted']
+        };
+        const [label, className] = badgeMap[dataMode] || badgeMap.unknown;
+        const coverageText = coverage == null ? '' : ` coverage ${(coverage * 100).toFixed(1)}%`;
+        document.getElementById('sysDataHealth').textContent = `${label}${coverageText}`;
+        document.getElementById('sysDataHealth').className = className;
+        await loadProviderHealthDetail(providerHealth);
     } catch(e) {
         document.getElementById('sysHealth').textContent = '🔴 無法連線';
         document.getElementById('sysHealth').className = 'negative';
@@ -1884,6 +2095,55 @@ async function loadSystemInfo() {
         const data = await resp.json();
         document.getElementById('sysLatestRec').textContent = (data.dates && data.dates[0]) || '無';
     } catch(e) {}
+}
+
+async function loadProviderHealthDetail(existingHealth) {
+    const detailEl = document.getElementById('sysDataHealthDetail');
+    const incidentEl = document.getElementById('providerHealthIncidentMessage');
+    const actionsEl = document.getElementById('providerHealthOperatorActions');
+    if (!detailEl) return;
+    try {
+        let providerHealth = existingHealth || {};
+        const resp = await fetch('/api/provider-health/latest');
+        if (resp.ok) providerHealth = await resp.json();
+        const diagnostics = providerHealth.diagnostics || {};
+        const coverage = providerHealth.coverage ?? providerHealth.provider_coverage_ratio;
+        const coverageText = coverage == null ? 'coverage=N/A' : `coverage=${(coverage * 100).toFixed(1)}%`;
+        const attempts = diagnostics.attempt_summary || (providerHealth.provider_attempts || []).map(a => `${a.provider}:${a.success ? 'ok' : (a.error_type || 'fail')}`).slice(0, 4).join(' > ') || 'N/A';
+        const fallbacks = diagnostics.fallback_outcome || (providerHealth.fallback_attempts || []).map(a => `${a.provider}:${a.success ? 'ok' : (a.error_type || 'fail')}`).slice(0, 3).join(' > ') || 'N/A';
+        const errors = diagnostics.top_error_summary || (providerHealth.top_error_types ? Object.entries(providerHealth.top_error_types).slice(0, 4).map(([k, v]) => `${k}:${v}`).join(', ') : 'none');
+        const skips = diagnostics.skip_summary || (providerHealth.skip_reasons ? Object.entries(providerHealth.skip_reasons).slice(0, 4).map(([k, v]) => `${k}:${v}`).join(', ') : 'none');
+        const stale = providerHealth.is_stale ? `stale_age=${providerHealth.stale_age_days ?? 'N/A'}d` : 'fresh_or_live';
+        if (incidentEl) {
+            const incidentPrefix = providerHealth.status === 'healthy' ? '資料供應正常' : '目前資料供應異常';
+            const snapshotText = providerHealth.is_using_last_valid_snapshot ? '，系統使用前次有效推薦' : '';
+            incidentEl.textContent = diagnostics.display_message || `${incidentPrefix}${snapshotText}`;
+            incidentEl.className = providerHealth.status === 'healthy' ? 'small positive' : 'small text-warning';
+        }
+        if (actionsEl) {
+            const actions = diagnostics.operator_actions || [];
+            actionsEl.textContent = actions.length ? `修復方式：${actions.slice(0, 3).join('；')}` : '修復方式：目前無需人工處理';
+            actionsEl.className = providerHealth.status === 'healthy' ? 'small text-muted mt-1' : 'small text-warning mt-1';
+        }
+        detailEl.textContent = [
+            `status=${providerHealth.status || 'unknown'}`,
+            coverageText,
+            `effective_provider=${providerHealth.effective_provider || 'N/A'}`,
+            stale,
+            `recommendation_source=${providerHealth.recommendation_source || 'unknown'}`,
+            `last_valid=${providerHealth.last_valid_recommendation_at || providerHealth.last_valid_recommendation_time || 'N/A'}`,
+            `attempts=${attempts}`,
+            `fallbacks=${fallbacks}`,
+            `errors=${errors}`,
+            `skips=${skips}`,
+        ].join(' | ');
+        detailEl.className = providerHealth.status === 'healthy' ? 'small positive' : 'small text-warning';
+    } catch (e) {
+        detailEl.textContent = 'provider health detail unavailable';
+        detailEl.className = 'small text-muted';
+        if (incidentEl) incidentEl.textContent = '目前資料供應異常：provider health 無法讀取';
+        if (actionsEl) actionsEl.textContent = '修復方式：確認 Dashboard API 與 provider_health_log 狀態';
+    }
 }
 </script>
 </body>

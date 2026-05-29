@@ -263,8 +263,36 @@ def format_ml_confidence(value) -> str:
         return "N/A"
 
 
+def format_swing_score(value) -> str:
+    numeric = _safe_number(value)
+    if numeric is None:
+        return "N/A"
+    return f"Score {numeric:.0f}"
+
+
+def format_swing_setup(rec: Mapping) -> str:
+    setup = _safe_text(rec.get("setup_type"), "N/A")
+    return f"{format_swing_score(rec.get('score', rec.get('total_score')))} / {setup}"
+
+
+def format_first_items(values, limit: int = 3) -> str:
+    if not isinstance(values, list):
+        return "N/A"
+    parts = [_safe_text(value, "") for value in values[:limit]]
+    parts = [part for part in parts if part]
+    return " / ".join(parts) if parts else "N/A"
+
+
 def build_decision_bubble(rec: Mapping) -> dict:
     valuation_text, header_color = get_valuation_style(rec)
+    swing_contents = []
+    if rec.get("setup_type") or rec.get("score") is not None or rec.get("reasons") or rec.get("risk_flags"):
+        swing_contents = [
+            flex_section_title("Swing Setup"),
+            flex_kv("Score / Setup", format_swing_setup(rec)),
+            flex_kv("Reasons", format_first_items(rec.get("reasons"), 3)),
+            flex_kv("Risk", format_first_items(rec.get("risk_flags"), 1)),
+        ]
 
     bubble = {
         "type": "bubble",
@@ -303,6 +331,7 @@ def build_decision_bubble(rec: Mapping) -> dict:
                 flex_kv("Support / Resistance", format_support_resistance_pair(rec)),
                 flex_kv("Buy Below", format_price_bound(rec.get("buy_price"), "<")),
                 flex_kv("Sell Above", format_price_bound(rec.get("sell_price"), ">")),
+                *swing_contents,
                 flex_section_title("Smart Money / AI"),
                 flex_kv("Institutional / Insider", format_smart_money_pair(rec)),
                 flex_kv("Whale / Holders", format_whale_holder_pair(rec)),

@@ -17,6 +17,7 @@ import hmac
 import base64
 import json
 import logging
+import math
 import re
 import threading
 import requests as http_requests
@@ -37,6 +38,15 @@ if _STRATEGIES_SRC_STR not in sys.path:
     sys.path.insert(0, _STRATEGIES_SRC_STR)
 
 from policies.valuation import GrowthAwarePolicy
+from screener.market_data_resilience import (
+    empty_provider_health as _empty_provider_health_contract,
+    normalize_provider_health,
+)
+from screener.swing_calibration import build_calibration_status, load_active_calibration_profile
+from screener.swing_calibration_drift import build_drift_report, read_recent_calibration_audit_events
+from screener.swing_ranking import normalize_swing_ranking_metadata
+from screener.swing_performance import build_performance_payload, load_swing_performance_rows
+from screener.presentation_utils import safe_float as _shared_safe_float
 
 try:
     from utils.line_flex import (
@@ -48,10 +58,15 @@ except ImportError:
     _build_decision_bubble = _line_flex_module.build_decision_bubble
     _sanitize_line_message = _line_flex_module.sanitize_line_message
 
+from . import flex_messages
+
 logger = logging.getLogger(__name__)
 if not logger.handlers:
     logger.addHandler(logging.StreamHandler())
 logger.setLevel(logging.DEBUG)
+
+CALIBRATION_FALLBACK_TEXT = "Calibration 狀態暫時無法取得，請稍後再試。"
+CALIBRATION_COMMAND = "/calibration"
 
 # ============================================
 # Blueprint & Secrets
@@ -73,6 +88,348 @@ def _get_db_engine():
     return _db_engine
 
 
+def _json_loads_safe(value, default=None):
+    if value in (None, ''):
+        return default
+    if isinstance(value, (dict, list)):
+        return value
+    try:
+        return json.loads(value)
+    except Exception:
+        return default
+
+
+def _empty_provider_health():
+    return _empty_provider_health_contract()
+
+
+def _load_latest_provider_health(conn):
+    if not _table_exists(conn, "provider_health_log"):
+        return _empty_provider_health()
+
+    row = conn.execute(text("""
+        SELECT *
+        FROM provider_health_log
+        ORDER BY run_at DESC, id DESC
+        LIMIT 1
+    """)).mappings().first()
+    if not row:
+        return _empty_provider_health()
+
+    return normalize_provider_health(dict(row))
+
+
+def _provider_health_is_degraded(provider_health: dict) -> bool:
+    provider_health = normalize_provider_health(provider_health)
+    status = provider_health.get("status")
+    mode = provider_health.get("current_data_mode")
+    coverage = provider_health.get("provider_coverage_ratio")
+    minimum = provider_health.get("minimum_coverage_ratio")
+    return (
+        status in {"degraded", "stale", "failed", "critical"}
+        or
+        mode in {"fallback", "stale", "failed"}
+        or bool(provider_health.get("stale_data_used"))
+        or (coverage is not None and minimum is not None and coverage < minimum)
+    )
+
+
+def _provider_health_text(provider_health: dict) -> str:
+    provider_health = normalize_provider_health(provider_health)
+    if not provider_health or not provider_health.get("provider_health_available", True):
+        return "data_provider_mode=unknown root_cause=provider_health_unavailable 修復方式=確認 provider_health_log 是否存在並可讀取"
+    coverage = provider_health.get("provider_coverage_ratio")
+    coverage_text = "unknown" if coverage is None else f"{coverage:.2f}"
+    top_errors = provider_health.get("top_error_types") or {}
+    top_error_text = ",".join(f"{key}:{value}" for key, value in top_errors.items()) or "none"
+    diagnostics = provider_health.get("diagnostics") or {}
+    actions = diagnostics.get("operator_actions") or []
+    action_text = "；".join(actions[:2]) if actions else "目前無需人工處理"
+    stale_text = (
+        f" stale_age_days={provider_health.get('stale_age_days')}"
+        if provider_health.get("is_stale") and provider_health.get("stale_age_days") is not None
+        else ""
+    )
+    last_valid = provider_health.get("last_valid_recommendation_at") or provider_health.get("last_valid_recommendation_time")
+    last_valid_text = f" last_valid_recommendation_at={last_valid}" if last_valid else ""
+    return (
+        f"data_health={provider_health.get('status', 'unknown')} "
+        f"data_provider_mode={provider_health.get('current_data_mode', 'unknown')} "
+        f"coverage={coverage_text} "
+        f"effective_provider={provider_health.get('effective_provider') or 'N/A'} "
+        f"live={provider_health.get('live_successes', 0)} "
+        f"fallback={provider_health.get('fallback_successes', 0)} "
+        f"failed={provider_health.get('failed_symbols', 0)} "
+        f"skipped={provider_health.get('skipped_symbols', 0)} "
+        f"recommendation_source={provider_health.get('recommendation_source', 'unknown')} "
+        f"top_errors={top_error_text}"
+        f"{stale_text}"
+        f"{last_valid_text}"
+        f" root_cause={diagnostics.get('root_cause', 'unknown')}"
+        f" fallback_outcome={diagnostics.get('fallback_outcome', 'unknown')}"
+        f" 診斷={diagnostics.get('display_message', '資料健康狀態待確認')}"
+        f" 修復方式={action_text}"
+    )
+
+
+def _load_latest_provider_health_for_linebot() -> dict:
+    try:
+        engine = _get_db_engine()
+        with engine.connect() as conn:
+            return _load_latest_provider_health(conn)
+    except Exception:
+        return _empty_provider_health()
+
+
+def _provider_incident_note_for_linebot() -> str | None:
+    provider_health = normalize_provider_health(_load_latest_provider_health_for_linebot())
+    if not _provider_health_is_degraded(provider_health):
+        return None
+    diagnostics = provider_health.get("diagnostics") or {}
+    root_cause = diagnostics.get("root_cause") or "unknown"
+    status = provider_health.get("status") or "unknown"
+    message = diagnostics.get("display_message") or "provider health degraded"
+    return (
+        f"Provider incident: {status} "
+        f"root_cause={root_cause} "
+        f"recommendation_source={provider_health.get('recommendation_source', 'unknown')} "
+        f"- provider health separate from calibration quality. {message}"
+    )
+
+
+def _load_performance_payload_for_linebot() -> dict:
+    engine = _get_db_engine()
+    with engine.connect() as conn:
+        if not _table_exists(conn, "swing_ranking_performance"):
+            payload = build_performance_payload([])
+            payload["calibration"] = build_calibration_status(load_active_calibration_profile())
+            return payload
+        rows = load_swing_performance_rows(conn, limit=500)
+    payload = build_performance_payload(rows, recent_limit=0)
+    payload["calibration"] = build_calibration_status(load_active_calibration_profile())
+    return payload
+
+
+def _load_calibration_drift_for_linebot() -> dict:
+    engine = _get_db_engine()
+    with engine.connect() as conn:
+        if not _table_exists(conn, "swing_ranking_performance"):
+            report = build_drift_report([], active_profile=load_active_calibration_profile())
+            report["recent_audit_events"] = read_recent_calibration_audit_events(conn, limit=5)
+            return report
+        rows = load_swing_performance_rows(conn, limit=500)
+        report = build_drift_report(rows, active_profile=load_active_calibration_profile())
+        report["recent_audit_events"] = read_recent_calibration_audit_events(conn, limit=5)
+        return report
+
+
+def _pct_text(value, signed: bool = True) -> str:
+    numeric = _safe_float(value)
+    if numeric is None:
+        return "N/A"
+    return f"{numeric * 100:+.1f}%" if signed else f"{numeric * 100:.1f}%"
+
+
+def _safe_int(value, default: int = 0) -> int:
+    try:
+        if value is None:
+            return default
+        numeric = float(value)
+        if not math.isfinite(numeric):
+            return default
+        return int(numeric)
+    except (TypeError, ValueError):
+        return default
+
+
+def _best_group(rows: list, name_key: str) -> tuple[str, str] | None:
+    candidates = [
+        row for row in rows or []
+        if _safe_float(row.get("avg_forward_return_20d")) is not None and int(row.get("sample_size") or 0) > 0
+    ]
+    if not candidates:
+        return None
+    best = max(candidates, key=lambda row: _safe_float(row.get("avg_forward_return_20d")) or -999)
+    return str(best.get(name_key) or "unknown"), _pct_text(best.get("avg_forward_return_20d"))
+
+
+def _calibration_line(calibration: dict | None) -> str:
+    calibration = calibration or {}
+    status = calibration.get("status") or "inactive"
+    sample_size = int(calibration.get("source_sample_size") or 0)
+    version = calibration.get("active_profile_version") or calibration.get("version")
+    if status == "active" and version:
+        return f"Calibration: active {version} n={sample_size}"
+    if status == "insufficient_data":
+        required = calibration.get("min_sample_size") or "N/A"
+        return f"Calibration: insufficient data n={sample_size}/{required}"
+    if status == "fallback_to_default":
+        reason = calibration.get("fallback_reason") or "invalid profile"
+        return f"Calibration: default profile fallback ({reason})"
+    return "Calibration: inactive/default profile"
+
+
+def _calibration_status_text(value) -> str:
+    return str(value or "unknown").replace("_", " ")
+
+
+def _calibration_fallback_messages() -> List[dict]:
+    return [_text_msg(CALIBRATION_FALLBACK_TEXT)]
+
+
+def _normalize_command_text(value: str) -> str:
+    return (value or "").strip().lower()
+
+
+def _canonical_command_name(command: str) -> Optional[str]:
+    if command in (CALIBRATION_COMMAND, "calibration"):
+        return CALIBRATION_COMMAND
+    if command:
+        return command
+    return None
+
+
+def _message_tree_has_invalid_value(value, *, depth: int = 0) -> bool:
+    if depth > 20:
+        return True
+    if value is None:
+        return True
+    if isinstance(value, float):
+        return not math.isfinite(value)
+    if isinstance(value, list):
+        if len(value) > 50:
+            return True
+        return any(_message_tree_has_invalid_value(item, depth=depth + 1) for item in value)
+    if isinstance(value, dict):
+        return any(_message_tree_has_invalid_value(item, depth=depth + 1) for item in value.values())
+    return False
+
+
+def _validate_line_messages_for_reply(messages: List[dict]) -> bool:
+    if not isinstance(messages, list) or not messages or len(messages) > 5:
+        return False
+    for message in messages:
+        if not isinstance(message, dict) or _message_tree_has_invalid_value(message):
+            return False
+        message_type = message.get("type")
+        if message_type == "text":
+            text = str(message.get("text") or "").strip()
+            if not text or len(text) > 5000:
+                return False
+        elif message_type == "flex":
+            alt_text = str(message.get("altText") or "").strip()
+            contents = message.get("contents")
+            if not alt_text or not isinstance(contents, dict) or not contents:
+                return False
+        else:
+            return False
+    return True
+
+
+def _build_calibration_reply_messages(report: dict, provider_note: str | None = None) -> List[dict]:
+    if not isinstance(report, dict):
+        raise ValueError("calibration report must be a dict")
+    if not report.get("active"):
+        sample = _safe_int(report.get("sample_size"))
+        lines = [
+            "Calibration Drift",
+            "Active: inactive/default profile",
+            f"Status: {_calibration_status_text(report.get('drift_status'))}",
+            f"Sample: {sample}",
+        ]
+        if provider_note:
+            lines.append(provider_note)
+        messages = [_text_msg("\n".join(lines))]
+        if not _validate_line_messages_for_reply(messages):
+            raise ValueError("invalid calibration reply payload")
+        return messages
+
+    lines = [
+        "Calibration Drift",
+        f"Active: {report.get('active_profile_version') or report.get('profile_version') or 'unknown'}",
+        f"Status: {_calibration_status_text(report.get('drift_status'))}",
+        f"Score bucket: {_calibration_status_text(report.get('score_bucket_status'))}",
+        f"Top5: {_calibration_status_text(report.get('top_rank_status'))}",
+        f"Risk flags: {_calibration_status_text(report.get('risk_flag_status'))}",
+        f"Impact: {_calibration_status_text(report.get('calibration_impact_status'))}",
+    ]
+    report_messages = report.get("messages") if isinstance(report.get("messages"), list) else []
+    for message in report_messages[:2]:
+        lines.append(f"Note: {message}")
+    if provider_note:
+        lines.append(provider_note)
+    messages = [_text_msg("\n".join(lines))]
+    if not _validate_line_messages_for_reply(messages):
+        raise ValueError("invalid calibration reply payload")
+    return messages
+
+
+def _cmd_calibration() -> List[dict]:
+    try:
+        report = _load_calibration_drift_for_linebot()
+        provider_note = _provider_incident_note_for_linebot()
+        return _build_calibration_reply_messages(report, provider_note)
+    except Exception as error:
+        _log_linebot(f"LineBot command=/calibration failed with exception: {type(error).__name__}: {error}")
+        return _calibration_fallback_messages()
+
+
+def _status_calibration_note() -> str | None:
+    try:
+        calibration = build_calibration_status(load_active_calibration_profile())
+    except Exception:
+        return None
+    if calibration.get("status") == "fallback_to_default":
+        return _calibration_line(calibration)
+    return None
+
+
+def _cmd_performance() -> List[dict]:
+    try:
+        payload = _load_performance_payload_for_linebot()
+        summary = payload.get("summary") or {}
+        sample_size = int(summary.get("sample_size") or 0)
+        if sample_size <= 0:
+            return [_text_msg("Swing ranking performance data is not available yet.")]
+
+        best_setup = _best_group(payload.get("setup_types") or [], "setup_type")
+        best_bucket = _best_group(payload.get("score_buckets") or [], "bucket")
+        risk_group = next(
+            (row for row in payload.get("risk_flags") or [] if row.get("group") == "any_risk_flag"),
+            None,
+        )
+        lines = [
+            "Swing Ranking Performance",
+            f"Sample: {sample_size} recommendations",
+            f"20D avg return: {_pct_text(summary.get('avg_forward_return_20d'))}",
+            f"20D hit rate: {_pct_text(summary.get('hit_rate_20d'), signed=False)}",
+        ]
+        if best_setup:
+            lines.append(f"Best setup: {best_setup[0]} {best_setup[1]}")
+        if best_bucket:
+            lines.append(f"Best score bucket: {best_bucket[0]} {best_bucket[1]}")
+        if risk_group:
+            lines.append(f"Risk-flagged avg return: {_pct_text(risk_group.get('avg_forward_return_20d'))}")
+        lines.append(_calibration_line(payload.get("calibration")))
+        provider_note = _provider_incident_note_for_linebot()
+        if provider_note:
+            lines.append(provider_note)
+        return [_text_msg("\n".join(lines))]
+    except Exception as error:
+        _log_linebot(f"Performance summary failed: {error}")
+        return [_text_msg("Swing ranking performance data is not available yet.")]
+
+
+def _critical_provider_failure_message(summary: dict) -> str:
+    coverage = float(summary.get("coverage_ratio", 0.0) or 0.0)
+    mode = summary.get("current_data_mode", "failed")
+    return "\n".join([
+        "資料供應異常，這次 Top5 掃描未寫入空推薦。",
+        f"current_data_mode={mode}, coverage={coverage:.2f}",
+        "已保留上一輪有效推薦，請先檢查 OpenBB / yfinance / DB fallback。",
+    ])
+
+
 def _log_linebot(message):
     """Write LINE Bot logs without crashing on non-UTF-8 Windows consoles."""
     text = str(message)
@@ -89,12 +446,7 @@ _VALUATION_POLICY = GrowthAwarePolicy()
 
 
 def _safe_float(value):
-    try:
-        if value is None:
-            return None
-        return float(value)
-    except (TypeError, ValueError):
-        return None
+    return _shared_safe_float(value)
 
 
 def _format_price(value):
@@ -757,7 +1109,7 @@ def handle_message_event(event: dict):
 
     messages = process_command(text, user_id=user_id)
     if messages and reply_token:
-        reply_messages(reply_token, messages)
+        reply_messages(reply_token, messages, command=_canonical_command_name(_normalize_command_text(text)))
 
 
 def handle_follow_event(event: dict):
@@ -798,6 +1150,8 @@ def _cmd_recommendation_strategy_help() -> List[dict]:
 
 
 def _route_recommendation_command(text_value: str) -> Optional[List[dict]]:
+    if (text_value or '').strip().lower() in {"/recommendations", "recommendations"}:
+        return _cmd_default_recommendations()
     stripped = (text_value or '').strip()
     if '推薦' not in stripped:
         return None
@@ -819,7 +1173,7 @@ def process_command(text: str, user_id: Optional[str] = None) -> Optional[List[d
     Returns:
         LINE message object 列表，或 None (非命令)
     """
-    cmd = text.strip().lower()
+    cmd = _normalize_command_text(text)
 
     # --- Web URL 查詢 ---
     if cmd in ('web', '/web', '網址'):
@@ -843,6 +1197,19 @@ def process_command(text: str, user_id: Optional[str] = None) -> Optional[List[d
         return _cmd_top5_basic()
 
     # --- ML 命令 ---
+    if cmd in ('/performance', 'performance'):
+        return _cmd_performance()
+
+    if cmd in (CALIBRATION_COMMAND, 'calibration'):
+        _log_linebot("LineBot command=/calibration started")
+        try:
+            messages = _cmd_calibration()
+            _log_linebot("LineBot command=/calibration build succeeded")
+            return messages
+        except Exception as error:
+            _log_linebot(f"LineBot command=/calibration failed with exception: {type(error).__name__}: {error}")
+            return _calibration_fallback_messages()
+
     if cmd.startswith(('ml ', '/ml ')) or cmd in ('ml', '/ml'):
         parts = text.strip().split()
         if len(parts) >= 2:
@@ -955,7 +1322,12 @@ def _cmd_stock(symbol: str) -> List[dict]:
         if not payload:
             return [_text_msg(f"??? {symbol} ?????????????")]
 
-        return [_text_msg(_build_stock_analysis_message(payload))]
+        text_fallback = _build_stock_analysis_message(payload)
+        try:
+            return [flex_messages.build_stock_check_message(payload)]
+        except Exception as flex_error:
+            _log_linebot(f"/stock flex build failed for {symbol}: {flex_error}")
+            return [_text_msg(text_fallback)]
     except Exception as error:
         logger.exception("Stock lookup failed for %s", symbol)
         _log_linebot(f"/stock lookup failed for {symbol}: {error}")
@@ -1066,7 +1438,29 @@ def _cmd_market() -> List[dict]:
                 f"  🟡 NEUTRAL = 正常配置\n"
                 f"  🔴 RISK_OFF = 保守防禦"
             )
-            return [_text_msg(msg)]
+            try:
+                return [flex_messages.build_market_regime_message({
+                    "regime": regime_str,
+                    "vix": vix_str,
+                    "yield_curve": yc_str,
+                    "unemployment": ur_str,
+                    "fed_rate": fed_str,
+                    "description": regime_desc,
+                    "date": regime_date,
+                })]
+            except Exception as flex_error:
+                _log_linebot(f"/market flex build failed: {flex_error}")
+                try:
+                    return [flex_messages.build_ml_prediction_message({
+                        "symbol": row[0],
+                        "date": row[1],
+                        "price": float(row[2]) if row[2] is not None else None,
+                        "ml_confidence": conf,
+                        "signal": "ML",
+                    })]
+                except Exception as flex_error:
+                    _log_linebot(f"ML flex build failed for {symbol}: {flex_error}")
+                    return [_text_msg(msg)]
 
     except Exception as e:
         _log_linebot(f"❌ /market 查詢失敗: {e}")
@@ -1109,7 +1503,21 @@ def _cmd_history(date_str: Optional[str] = None) -> List[dict]:
                     ml = f"{float(r[4])*100:.0f}%" if r[4] else "—"
                     lines.append(f"  #{r[1]} {r[0]} | {r[2]} | 分:{float(r[3]):.1f} | ML:{ml}")
 
-                return [_text_msg("\n".join(lines))]
+                text_fallback = "\n".join(lines)
+                try:
+                    return [flex_messages.build_history_recommendation_message(target, [
+                        {
+                            "symbol": r[0],
+                            "rank": r[1],
+                            "signal": r[2],
+                            "total_score": float(r[3]) if r[3] is not None else None,
+                            "ml_confidence": float(r[4]) if r[4] is not None else None,
+                        }
+                        for r in recs
+                    ])]
+                except Exception as flex_error:
+                    _log_linebot(f"/history flex build failed for {target}: {flex_error}")
+                    return [_text_msg(text_fallback)]
             else:
                 # List recent dates
                 dates = conn.execute(sql_text("""
@@ -1200,7 +1608,21 @@ def _cmd_sector() -> List[dict]:
                 lines.append(f"     20日: {r20} | 63日: {r63}")
 
             lines.append("\n💡 輸入 /stock SYMBOL 查看個股")
-            return [_text_msg("\n".join(lines))]
+            text_fallback = "\n".join(lines)
+            try:
+                return [flex_messages.build_sector_ranking_message([
+                    {
+                        "sector": s[0],
+                        "etf": s[1],
+                        "rank": s[2],
+                        "return_20d": s[3],
+                        "return_63d": s[4],
+                    }
+                    for s in sectors
+                ])]
+            except Exception as flex_error:
+                _log_linebot(f"/sector flex build failed: {flex_error}")
+                return [_text_msg(text_fallback)]
 
     except Exception as e:
         _log_linebot(f"❌ /sector 查詢失敗: {e}")
@@ -1219,6 +1641,7 @@ def _cmd_status() -> List[dict]:
         db_ok = False
         latest_rec = "N/A"
         rec_count = 0
+        provider_health = _empty_provider_health()
         try:
             with engine.connect() as conn:
                 conn.execute(sql_text("SELECT 1"))
@@ -1229,11 +1652,31 @@ def _cmd_status() -> List[dict]:
                 if r:
                     latest_rec = str(r[0]) if r[0] else "N/A"
                     rec_count = r[1] or 0
+                provider_health = _load_latest_provider_health(conn)
         except Exception:
             pass
 
         db_emoji = "🟢" if db_ok else "🔴"
         now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        provider_line = _provider_health_text(provider_health)
+        calibration_note = _status_calibration_note()
+        provider_warning = ""
+        if _provider_health_is_degraded(provider_health):
+            provider_warning = "\n資料供應異常：目前不是完整 live data，請勿視為系統完全正常。"
+        status_msg = "\n".join([
+            "系統狀態",
+            "=" * 24,
+            f"{db_emoji} DB: {'connected' if db_ok else 'disconnected'}",
+            f"latest_recommendation={latest_rec}",
+            f"recommendation_rows={rec_count:,}",
+            provider_line,
+            f"last_successful_run_at={provider_health.get('last_successful_run_at') or 'N/A'}",
+            "strategy_engine=v2 (11 strategies + ML)",
+            f"checked_at={now}",
+        ]) + provider_warning
+        if calibration_note:
+            status_msg = status_msg.replace(f"checked_at={now}", f"{calibration_note}\nchecked_at={now}")
+        return [_text_msg(status_msg)]
 
         msg = (
             f"📊 系統狀態報告\n"
@@ -1280,6 +1723,7 @@ _DAILY_RECOMMENDATION_COLUMNS = (
     ('whale_held_pct', 'whale_held_pct', 'NULL'),
     ('inst_count', 'inst_count', 'NULL'),
     ('institutional_net_buy', 'institutional_net_buy', 'NULL'),
+    ('strategy_details', 'strategy_details', 'NULL'),
 )
 
 
@@ -1306,7 +1750,7 @@ def _row_to_recommendation(conn, row_mapping, rank=None, reason_prefix: str | No
     if reason_prefix:
         reason = f'{reason_prefix}：{reason}'
 
-    return {
+    result = {
         'symbol': row_mapping.get('symbol'),
         'rank': rank if rank is not None else int(row_mapping.get('rank_position') or 0),
         'signal': row_mapping.get('signal_type') or 'BUY',
@@ -1343,6 +1787,12 @@ def _row_to_recommendation(conn, row_mapping, rank=None, reason_prefix: str | No
         'institutional_net_buy': _safe_float(row_mapping.get('institutional_net_buy')),
         'news_sentiment': _safe_float(row_mapping.get('news_sentiment')),
     }
+    result.update(normalize_swing_ranking_metadata(
+        row_mapping.get('strategy_details'),
+        fallback_score=result['total_score'],
+        rank=result['rank'],
+    ))
+    return result
 
 
 def _latest_recommendation_date(conn):
@@ -1399,6 +1849,15 @@ def _cmd_default_recommendations() -> List[dict]:
 
             flex = _build_top5_flex(recs, f"{str(latest)} XGBoost+籌碼濾網")
             flex["quickReply"] = _recommendation_quick_reply(recs)
+            provider_health = _load_latest_provider_health(conn)
+            if _provider_health_is_degraded(provider_health):
+                flex = flex_messages.build_recommendations_carousel(
+                    recs,
+                    f"{str(latest)} XGBoost recommendations",
+                    degraded=True,
+                )
+                flex["quickReply"] = _recommendation_quick_reply(recs)
+                return [_text_msg(_provider_health_text(provider_health)), flex]
             return [flex]
 
     except Exception as e:
@@ -1566,10 +2025,11 @@ def _cmd_top5() -> List[dict]:
                 SELECT symbol, rank_position, signal_type, total_score,
                        current_price, target_price, ml_confidence,
                        institutional_ownership, insider_sentiment,
-                      institutional_pass, money_flow_pass,
+                       institutional_pass, money_flow_pass,
                        valuation_status, buy_price, sell_price, reason_summary,
                        support_1, resistance_1,
-                       breakout_pass, acceleration_pass, peg_pass, dupont_pass
+                       breakout_pass, acceleration_pass, peg_pass, dupont_pass,
+                       strategy_details
                 FROM daily_recommendations
                 WHERE scan_date = :d
                 ORDER BY rank_position ASC
@@ -1581,7 +2041,7 @@ def _cmd_top5() -> List[dict]:
                 institutional_pass = bool(row['institutional_pass']) if row['institutional_pass'] is not None else None
                 money_flow_pass = bool(row['money_flow_pass']) if row['money_flow_pass'] is not None else None
                 today_flow = _build_today_flow_snapshot(conn, row['symbol'], money_flow_pass=money_flow_pass)
-                recs.append({
+                rec = {
                     'symbol': row['symbol'],
                     'rank': row['rank_position'],
                     'signal': row['signal_type'],
@@ -1605,7 +2065,13 @@ def _cmd_top5() -> List[dict]:
                     'acceleration_pass': bool(row['acceleration_pass']),
                     'peg_pass': bool(row['peg_pass']),
                     'dupont_pass': bool(row['dupont_pass']),
-                })
+                }
+                rec.update(normalize_swing_ranking_metadata(
+                    row.get('strategy_details'),
+                    fallback_score=rec['total_score'],
+                    rank=rec['rank'],
+                ))
+                recs.append(rec)
 
             if not recs:
                 return [_text_msg("📊 該日期無推薦資料")]
@@ -1654,7 +2120,8 @@ def _cmd_top5_basic() -> List[dict]:
                       institutional_pass, money_flow_pass,
                        valuation_status, buy_price, sell_price, reason_summary,
                        support_1, resistance_1,
-                       breakout_pass, acceleration_pass, peg_pass, dupont_pass
+                       breakout_pass, acceleration_pass, peg_pass, dupont_pass,
+                       strategy_details
                 FROM daily_recommendations
                 WHERE scan_date = :d
                 ORDER BY rank_position ASC
@@ -1676,7 +2143,7 @@ def _cmd_top5_basic() -> List[dict]:
                 institutional_pass = bool(row['institutional_pass']) if row['institutional_pass'] is not None else None
                 money_flow_pass = bool(row['money_flow_pass']) if row['money_flow_pass'] is not None else None
                 today_flow = _build_today_flow_snapshot(conn, row['symbol'], money_flow_pass=money_flow_pass)
-                recs.append({
+                rec = {
                     'symbol': row['symbol'],
                     'rank': row['rank_position'],
                     'signal': row['signal_type'],
@@ -1700,7 +2167,13 @@ def _cmd_top5_basic() -> List[dict]:
                     'acceleration_pass': bool(row['acceleration_pass']),
                     'peg_pass': bool(row['peg_pass']),
                     'dupont_pass': bool(row['dupont_pass']),
-                })
+                }
+                rec.update(normalize_swing_ranking_metadata(
+                    row.get('strategy_details'),
+                    fallback_score=rec['total_score'],
+                    rank=rec['rank'],
+                ))
+                recs.append(rec)
 
             if not recs:
                 return [_text_msg("📊 該日期無推薦資料")]
@@ -1767,6 +2240,8 @@ def _cmd_ml(symbol: str) -> List[dict]:
             """), {'sym': symbol}).first()
 
             if not row2:
+                if symbol == "NVDI":
+                    return [_text_msg("找不到 NVDI 的 ML 預測資料。是否想查 NVDA?")]
                 return [_text_msg(f"❌ 找不到 {symbol} 的 ML 預測資料")]
 
             conf = float(row2[3]) if row2[3] else 0
@@ -1774,7 +2249,7 @@ def _cmd_ml(symbol: str) -> List[dict]:
             s1 = f"${float(row2[6]):.2f}" if row2[6] else "N/A"
             r1 = f"${float(row2[7]):.2f}" if row2[7] else "N/A"
 
-            return [_text_msg(
+            text_fallback = (
                 f"🤖 {row2[0]} ML 預測\n\n"
                 f"📅 日期: {row2[1]}\n"
                 f"💰 價格: ${float(row2[2]):.2f}\n"
@@ -1783,7 +2258,21 @@ def _cmd_ml(symbol: str) -> List[dict]:
                 f"🤖 ML 信心度: {conf_str}\n"
                 f"📉 支撐: {s1}\n"
                 f"📈 壓力: {r1}"
-            )]
+            )
+            try:
+                return [flex_messages.build_ml_prediction_message({
+                    "symbol": row2[0],
+                    "date": row2[1],
+                    "price": float(row2[2]) if row2[2] is not None else None,
+                    "score": float(row2[4]) if row2[4] is not None else None,
+                    "signal": row2[5],
+                    "ml_confidence": conf,
+                    "support": float(row2[6]) if row2[6] is not None else None,
+                    "resistance": float(row2[7]) if row2[7] is not None else None,
+                })]
+            except Exception as flex_error:
+                _log_linebot(f"ML flex build failed for {symbol}: {flex_error}")
+                return [_text_msg(text_fallback)]
 
     except Exception as e:
         _log_linebot(f"❌ ML 查詢失敗: {e}")
@@ -1794,16 +2283,11 @@ def _cmd_ml(symbol: str) -> List[dict]:
 # Flex Message 建構
 # ============================================
 def _build_top5_flex(recs: list, scan_date: str) -> dict:
-    """建構 Top 5 推薦的 Flex Carousel"""
-    bubbles = [_build_bubble(rec) for rec in recs]
-    return {
-        "type": "flex",
-        "altText": f"📊 每日選股推薦 Top {len(recs)} — {scan_date}",
-        "contents": {
-            "type": "carousel",
-            "contents": bubbles,
-        },
-    }
+    """Build Top recommendation Flex Carousel."""
+    return flex_messages.build_recommendations_carousel(
+        recs,
+        f"Top {len(recs)} recommendations {scan_date}",
+    )
 
 
 def _build_bubble(rec: dict) -> dict:
@@ -1819,13 +2303,30 @@ def _text_msg(s: str) -> dict:
     return {"type": "text", "text": s.strip()}
 
 
-def reply_messages(reply_token: str, messages: List[dict]):
+def reply_messages(reply_token: str, messages: List[dict], command: Optional[str] = None, fallback_messages: Optional[List[dict]] = None):
     """Reply to LINE messages with sanitized payloads."""
     if not CHANNEL_TOKEN:
-        _log_linebot("Channel token not configured; cannot reply.")
-        return
+        if command == CALIBRATION_COMMAND:
+            _log_linebot("LineBot command=/calibration failed with exception: channel token not configured")
+        else:
+            _log_linebot("Channel token not configured; cannot reply.")
+        return False
 
-    safe_messages = [_sanitize_line_message(message) for message in messages[:5]]
+    try:
+        safe_messages = [_sanitize_line_message(message) for message in messages[:5]]
+        if not _validate_line_messages_for_reply(safe_messages):
+            raise ValueError("invalid LINE reply payload")
+    except Exception as error:
+        if command != CALIBRATION_COMMAND:
+            _log_linebot(f"Reply payload validation failed: {type(error).__name__}: {error}")
+            if not fallback_messages:
+                return False
+            safe_messages = [_sanitize_line_message(message) for message in fallback_messages[:5]]
+            if not _validate_line_messages_for_reply(safe_messages):
+                return False
+        _log_linebot(f"LineBot command=/calibration failed with exception: {type(error).__name__}: {error}")
+        safe_messages = _calibration_fallback_messages()
+
     for message in safe_messages:
         if message.get("type") == "flex":
             logger.debug(json.dumps(message.get("contents", {}), ensure_ascii=False))
@@ -1846,13 +2347,27 @@ def reply_messages(reply_token: str, messages: List[dict]):
             timeout=10,
         )
         if resp.status_code == 200:
-            _log_linebot("Reply sent successfully")
+            if command == CALIBRATION_COMMAND:
+                _log_linebot("LineBot command=/calibration reply sent successfully")
+            else:
+                _log_linebot("Reply sent successfully")
+            return True
+
+        logger.error("LINE reply failed payload=%s", json.dumps(payload, ensure_ascii=False))
+        if command == CALIBRATION_COMMAND:
+            _log_linebot(f"LineBot command=/calibration failed with exception: reply failed {resp.status_code} - {resp.text}")
         else:
-            logger.error("LINE reply failed payload=%s", json.dumps(payload, ensure_ascii=False))
             _log_linebot(f"Reply failed: {resp.status_code} - {resp.text}")
     except Exception as error:
         logger.exception("LINE reply request failed payload=%s", json.dumps(payload, ensure_ascii=False))
-        _log_linebot(f"Reply request failed: {error}")
+        if command == CALIBRATION_COMMAND:
+            _log_linebot(f"LineBot command=/calibration failed with exception: {type(error).__name__}: {error}")
+        else:
+            _log_linebot(f"Reply request failed: {error}")
+    if fallback_messages and messages != fallback_messages:
+        _log_linebot("Retrying reply with text fallback")
+        return reply_messages(reply_token, fallback_messages, command=command)
+    return False
 
 
 def push_message(user_id: str, messages: List[dict]) -> bool:
@@ -1901,14 +2416,28 @@ def _run_screener_and_push(user_id: str):
         screener = DailyScreener(use_ml=True)
         df_all = screener.scan_all()
         recommendations = screener.get_top_recommendations(df_all, n=5)
+        summary = getattr(screener, "last_run_summary", {}) or {}
 
         if not recommendations:
+            if summary.get("current_data_mode") == "failed" or float(summary.get("coverage_ratio", 0.0) or 0.0) < 0.2:
+                push_message(user_id, [_text_msg(_critical_provider_failure_message(summary))])
+                return
             push_message(user_id, [_text_msg("📊 最新掃描未產生可用推薦結果。")])
             return
 
-        screener.save_to_db(recommendations)
+        wrote = screener.save_to_db(recommendations)
+        summary["recommendations_written"] = bool(wrote)
+        if not wrote and (summary.get("current_data_mode") == "failed" or float(summary.get("coverage_ratio", 0.0) or 0.0) < 0.2):
+            push_message(user_id, [_text_msg(_critical_provider_failure_message(summary))])
+            return
         flex = _build_top5_flex(recommendations, datetime.now().strftime('%Y-%m-%d'))
-        push_message(user_id, [flex])
+        if summary.get("current_data_mode") in {"fallback", "stale"} or summary.get("degraded"):
+            push_message(user_id, [_text_msg(_provider_health_text(normalize_provider_health({
+                **summary,
+                "provider_health_available": True,
+            }))), flex])
+        else:
+            push_message(user_id, [flex])
     except Exception as error:
         logger.exception("Background Top5 scan failed for user %s", user_id)
         _log_linebot(f"Background Top5 scan failed: {type(error).__name__}: {error}")

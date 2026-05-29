@@ -15,7 +15,7 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from pathlib import Path
-from datetime import date
+from datetime import date, timedelta
 from typing import Any, List, Dict, Optional, Tuple
 
 import pandas as pd
@@ -26,14 +26,31 @@ _SRC_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(_SRC_DIR))
 
 from screener.support_resistance import calc_support_resistance
+from screener.swing_ranking import score_swing_candidate
 from screener.market_data_resilience import (
+    DATA_MODE_FAILED,
+    DATA_MODE_FALLBACK,
+    DATA_MODE_LIVE,
+    DATA_MODE_STALE,
+    DATA_MODE_UNKNOWN,
+    ERROR_CRITICAL_STALE_FALLBACK,
     ERROR_NO_PRICE_DATA,
+    ERROR_STALE_FALLBACK_TOO_OLD,
     STATUS_FALLBACK_SUCCESS,
     STATUS_LIVE_SUCCESS,
     MarketDataFetchResult,
     build_provider_health_summary,
     classify_provider_error,
+    compute_current_data_mode,
     is_retryable_status,
+    persist_provider_health,
+    summarize_error_types,
+)
+from adapters.market_data_provider import (
+    LocalDatabaseProvider,
+    OpenBBHistoricalProvider,
+    ProviderResult,
+    YFinanceProvider,
 )
 from config import DEFAULT_SYMBOLS, evaluate_stock_rules_v2
 from policies.valuation import GrowthAwarePolicy
@@ -246,6 +263,22 @@ class DailyScreener:
         self.market_data_timeout_seconds = max(1.0, float(os.getenv('MARKET_DATA_TIMEOUT_SECONDS', '15')))
         self.market_data_retry_backoff_seconds = max(0.0, float(os.getenv('MARKET_DATA_RETRY_BACKOFF_SECONDS', '1')))
         self.market_data_max_age_days = max(0, int(os.getenv('MARKET_DATA_MAX_AGE_DAYS', '3')))
+        self.market_data_stale_max_age_days = max(
+            self.market_data_max_age_days,
+            int(os.getenv('MARKET_DATA_STALE_MAX_AGE_DAYS', '30')),
+        )
+        self.max_stale_fallback_days = max(
+            self.market_data_max_age_days,
+            int(os.getenv('SCREENER_MAX_STALE_FALLBACK_DAYS', '5')),
+        )
+        self.critical_stale_days = max(
+            self.max_stale_fallback_days,
+            int(os.getenv('SCREENER_CRITICAL_STALE_DAYS', '10')),
+        )
+        self.critical_coverage_ratio = min(
+            1.0,
+            max(0.0, float(os.getenv('SCREENER_CRITICAL_COVERAGE_RATIO', '0.2'))),
+        )
         self.minimum_coverage_ratio = min(
             1.0,
             max(0.0, float(os.getenv('SCREENER_MIN_COVERAGE_RATIO', '0.6'))),
@@ -263,6 +296,11 @@ class DailyScreener:
             'valid_symbols': 0,
             'coverage_ratio': 0.0,
             'minimum_coverage_ratio': self.minimum_coverage_ratio,
+            'critical_coverage_ratio': self.critical_coverage_ratio,
+            'current_data_mode': DATA_MODE_UNKNOWN,
+            'stale_data_used': False,
+            'provider_counts': {},
+            'top_error_types': {},
             'recommendations_written': False,
         }
         
@@ -389,72 +427,163 @@ class DailyScreener:
         age_days = max(0, (pd.Timestamp(date.today()) - latest_timestamp.normalize()).days)
         return normalized, age_days
 
+    def _build_market_data_providers(self):
+        return [
+            OpenBBHistoricalProvider(timeout_seconds=self.market_data_timeout_seconds),
+            YFinanceProvider(),
+            LocalDatabaseProvider(
+                db_factory=self._get_fallback_db,
+                max_fresh_age_days=self.market_data_max_age_days,
+            ),
+        ]
+
+    @property
+    def market_data_providers(self):
+        providers = getattr(self, "_market_data_providers", None)
+        if providers is None:
+            providers = self._build_market_data_providers()
+            self._market_data_providers = providers
+        return providers
+
     def _store_fetch_result(self, result: MarketDataFetchResult) -> MarketDataFetchResult:
         self._latest_fetch_results[result.symbol] = result
         return result
 
-    def fetch_stock_data_result(self, symbol: str) -> MarketDataFetchResult:
+    def _provider_date_window(self) -> tuple[str, str]:
+        end_date = date.today()
+        start_date = end_date - timedelta(days=420)
+        return start_date.isoformat(), end_date.isoformat()
+
+    def _fetch_provider_with_retry(self, provider, symbol: str, start_date: str, end_date: str) -> tuple[ProviderResult, list[dict]]:
         max_attempts = max(1, self.market_data_retry_count + 1)
-        last_status = ERROR_NO_PRICE_DATA
-        last_message = "No price data found"
-
+        attempts = []
+        last_result = None
         for attempt in range(1, max_attempts + 1):
-            try:
-                df, info = self._fetch_live_stock_data_with_timeout(symbol)
-                return self._store_fetch_result(MarketDataFetchResult(
-                    symbol=symbol,
-                    status=STATUS_LIVE_SUCCESS,
-                    message='live provider success',
-                    df=df,
-                    info=info,
-                    attempts=attempt,
-                ))
-            except Exception as exc:
-                last_status = classify_provider_error(exc)
-                last_message = str(exc)
-                print(
-                    f"  [provider-error] symbol={symbol} provider=yfinance "
-                    f"status={last_status} attempt={attempt}/{max_attempts} message={last_message}"
-                )
-
-                if attempt < max_attempts and is_retryable_status(last_status):
-                    if self.market_data_retry_backoff_seconds > 0:
-                        time.sleep(self.market_data_retry_backoff_seconds)
-                    continue
-                break
-
-        fallback_df, cache_age_days = self._load_market_data_fallback(symbol)
-        if fallback_df is not None and cache_age_days is not None:
-            if cache_age_days <= self.market_data_max_age_days:
-                print(
-                    f"  [provider-fallback] symbol={symbol} provider=market_data "
-                    f"status={STATUS_FALLBACK_SUCCESS} cache_age_days={cache_age_days}"
-                )
-                return self._store_fetch_result(MarketDataFetchResult(
-                    symbol=symbol,
-                    provider='market_data',
-                    status=STATUS_FALLBACK_SUCCESS,
-                    message=f'using market_data fallback age={cache_age_days}d',
-                    df=fallback_df,
-                    info={},
-                    attempts=max_attempts,
-                    used_fallback=True,
-                    cache_age_days=cache_age_days,
-                ))
-
+            result = provider.fetch_daily_ohlcv(symbol, start_date, end_date)
+            last_result = result
+            attempts.append({
+                'provider': getattr(provider, 'provider_name', result.provider_name),
+                'attempt': attempt,
+                'success': result.success,
+                'error_type': result.error_type,
+                'message': result.message,
+                'is_retriable': result.is_retriable,
+                'data_mode': result.data_mode,
+                'cache_age_days': result.cache_age_days,
+                'raw_metadata': result.raw_metadata or {},
+            })
+            if result.success:
+                return result, attempts
             print(
-                f"  [provider-fallback-rejected] symbol={symbol} provider=market_data "
-                f"status={last_status} cache_age_days={cache_age_days}"
+                f"  [provider-error] symbol={symbol} provider={result.provider_name} "
+                f"status={result.error_type} attempt={attempt}/{max_attempts} message={result.message}"
             )
-            last_message = f"{last_message}; stale fallback age={cache_age_days}d"
+            if attempt < max_attempts and result.is_retriable:
+                if self.market_data_retry_backoff_seconds > 0:
+                    time.sleep(self.market_data_retry_backoff_seconds)
+                continue
+            break
+        return last_result, attempts
+
+    def fetch_stock_data_result(self, symbol: str) -> MarketDataFetchResult:
+        start_date, end_date = self._provider_date_window()
+        all_attempts = []
+        last_result = ProviderResult.failure(symbol, 'provider_chain', ERROR_NO_PRICE_DATA, 'No price data found')
+
+        for provider_index, provider in enumerate(self.market_data_providers):
+            result, attempts = self._fetch_provider_with_retry(provider, symbol, start_date, end_date)
+            all_attempts.extend(attempts)
+            last_result = result
+            if not result or not result.success:
+                continue
+
+            if (
+                result.provider_name == 'market_data'
+                and result.data_mode == DATA_MODE_STALE
+                and result.cache_age_days is not None
+                and result.cache_age_days > self.max_stale_fallback_days
+            ):
+                error_type = (
+                    ERROR_CRITICAL_STALE_FALLBACK
+                    if result.cache_age_days > self.critical_stale_days
+                    else ERROR_STALE_FALLBACK_TOO_OLD
+                )
+                message = (
+                    f"local DB fallback cache_age_days={result.cache_age_days} exceeds "
+                    f"max_stale_fallback_days={self.max_stale_fallback_days}"
+                )
+                if all_attempts:
+                    all_attempts[-1].update({
+                        'success': False,
+                        'error_type': error_type,
+                        'message': message,
+                        'data_mode': DATA_MODE_FAILED,
+                    })
+                last_result = ProviderResult(
+                    symbol=symbol,
+                    provider_name=result.provider_name,
+                    success=False,
+                    error_type=error_type,
+                    message=message,
+                    data_mode=DATA_MODE_FAILED,
+                    cache_age_days=result.cache_age_days,
+                    is_retriable=False,
+                    raw_metadata={
+                        'max_stale_fallback_days': self.max_stale_fallback_days,
+                        'critical_stale_days': self.critical_stale_days,
+                    },
+                )
+                print(
+                    f"  [provider-fallback-rejected] symbol={symbol} provider={result.provider_name} "
+                    f"status={error_type} cache_age_days={result.cache_age_days}"
+                )
+                continue
+
+            if result.cache_age_days is not None and result.data_mode == DATA_MODE_STALE:
+                print(
+                    f"  [provider-fallback-stale] symbol={symbol} provider={result.provider_name} "
+                    f"cache_age_days={result.cache_age_days}"
+                )
+            elif provider_index > 0:
+                print(
+                    f"  [provider-fallback] symbol={symbol} provider={result.provider_name} "
+                    f"status={STATUS_FALLBACK_SUCCESS} data_mode={result.data_mode}"
+                )
+
+            status = STATUS_LIVE_SUCCESS if result.data_mode == DATA_MODE_LIVE else STATUS_FALLBACK_SUCCESS
+            return self._store_fetch_result(MarketDataFetchResult(
+                symbol=symbol,
+                provider=result.provider_name,
+                status=status,
+                message=f'{result.provider_name} provider success',
+                df=result.df,
+                info=result.info,
+                attempts=len(all_attempts),
+                used_fallback=result.data_mode in {DATA_MODE_FALLBACK, DATA_MODE_STALE} or provider_index > 0,
+                cache_age_days=result.cache_age_days,
+                data_mode=result.data_mode,
+                is_retriable=False,
+                provider_attempts=all_attempts,
+                fallback_attempted=len(self.market_data_providers) > 1,
+            ))
 
         return self._store_fetch_result(MarketDataFetchResult(
             symbol=symbol,
-            status=last_status,
-            message=last_message,
-            attempts=max_attempts,
+            provider=last_result.provider_name if last_result else 'provider_chain',
+            status=last_result.error_type if last_result else ERROR_NO_PRICE_DATA,
+            message=last_result.message if last_result else 'No price data found',
+            attempts=len(all_attempts),
             used_fallback=False,
-            cache_age_days=cache_age_days,
+            cache_age_days=last_result.cache_age_days if last_result else None,
+            data_mode=DATA_MODE_FAILED,
+            is_retriable=last_result.is_retriable if last_result else False,
+            provider_attempts=all_attempts,
+            fallback_attempted=len(self.market_data_providers) > 1,
+            skip_reason=(
+                last_result.error_type
+                if last_result and last_result.error_type in {ERROR_STALE_FALLBACK_TOO_OLD, ERROR_CRITICAL_STALE_FALLBACK}
+                else 'provider_data_unavailable'
+            ),
         ))
 
     def fetch_stock_data(self, symbol: str) -> Tuple[Optional[pd.DataFrame], dict]:
@@ -515,6 +644,9 @@ class DailyScreener:
 
         close_col = 'Close' if 'Close' in df.columns else 'close'
         current_price = float(df[close_col].iloc[-1])
+        swing_result = score_swing_candidate(symbol, df)
+        if not swing_result.is_valid:
+            return None
         eps_ttm = self._normalize_optional_number(
             info.get('trailingEps')
             or info.get('epsTrailingTwelveMonths')
@@ -558,9 +690,10 @@ class DailyScreener:
         if ml_conf > 0:
             # Rating = Raw_Score * (Confidence / 0.5)
             confidence_factor = ml_conf / 0.5
-            total_score = rule_score * confidence_factor
+            legacy_total_score = rule_score * confidence_factor
         else:
-            total_score = rule_score  # 0 ~ 4
+            legacy_total_score = rule_score  # 0 ~ 4
+        total_score = swing_result.total_score
 
         # --- 支撐壓力 ---
         sr = calc_support_resistance(df)
@@ -577,6 +710,12 @@ class DailyScreener:
         min_passes = max(2, total_strategies * 0.3)
         min_score = max(2.0, total_strategies * 0.2)
         signal_type = 'BUY' if passes >= min_passes or total_score >= min_score else 'SELL'
+        swing_metadata = swing_result.to_metadata()
+        all_results = {
+            **all_results,
+            'swing_ranking': swing_metadata,
+            'legacy_rule_score': round(legacy_total_score, 2),
+        }
 
         return {
             'symbol': symbol,
@@ -609,6 +748,7 @@ class DailyScreener:
             'passes': passes,
             'total_strategies': total_strategies,
             'all_results': all_results,
+            'swing_ranking': swing_metadata,
         }
 
     # ----------------------------------------------------------
@@ -633,12 +773,26 @@ class DailyScreener:
             'total_symbols': len(self.symbols),
             'live_successes': 0,
             'fallback_successes': 0,
+            'stale_successes': 0,
             'failed_symbols': [],
             'skipped_symbols': [],
             'valid_symbols': 0,
             'coverage_ratio': 0.0,
             'minimum_coverage_ratio': self.minimum_coverage_ratio,
+            'critical_coverage_ratio': self.critical_coverage_ratio,
+            'current_data_mode': DATA_MODE_UNKNOWN,
+            'stale_data_used': False,
+            'provider_counts': {},
+            'top_error_types': {},
             'recommendations_written': False,
+            'provider_attempts': [],
+            'fallback_attempts': [],
+            'skip_reasons': {},
+            'stale_age_days': None,
+            'max_stale_fallback_days': self.max_stale_fallback_days,
+            'critical_stale_days': self.critical_stale_days,
+            'max_stale_age_exceeded': False,
+            'critical_stale_fallback': False,
         }
         self._latest_fetch_results = {}
         for i, symbol in enumerate(self.symbols, 1):
@@ -646,15 +800,39 @@ class DailyScreener:
             result = self.evaluate_stock(symbol)
             fetch_result = self._latest_fetch_results.get(symbol)
             if fetch_result:
+                provider_counts = summary['provider_counts']
+                provider_counts[fetch_result.provider] = provider_counts.get(fetch_result.provider, 0) + 1
+                summary['provider_attempts'].extend(fetch_result.provider_attempts or [])
+                fallback_attempts = [
+                    attempt for attempt in (fetch_result.provider_attempts or [])
+                    if attempt.get('provider') != 'openbb'
+                ]
+                summary['fallback_attempts'].extend(fallback_attempts)
+                if fetch_result.cache_age_days is not None:
+                    summary['stale_age_days'] = max(
+                        summary['stale_age_days'] or 0,
+                        fetch_result.cache_age_days,
+                    )
+                    if fetch_result.cache_age_days > self.max_stale_fallback_days:
+                        summary['max_stale_age_exceeded'] = True
+                    if fetch_result.cache_age_days > self.critical_stale_days:
+                        summary['critical_stale_fallback'] = True
                 if fetch_result.status == STATUS_LIVE_SUCCESS:
                     summary['live_successes'] += 1
                 elif fetch_result.status == STATUS_FALLBACK_SUCCESS:
                     summary['fallback_successes'] += 1
+                    if fetch_result.data_mode == DATA_MODE_STALE:
+                        summary['stale_successes'] += 1
+                        summary['stale_data_used'] = True
                 else:
                     summary['failed_symbols'].append({
                         'symbol': symbol,
                         'status': fetch_result.status,
+                        'provider': fetch_result.provider,
                         'message': fetch_result.message,
+                        'provider_attempts': fetch_result.provider_attempts,
+                        'fallback_attempted': fetch_result.fallback_attempted,
+                        'is_retriable': fetch_result.is_retriable,
                     })
 
                 if fetch_result.df is not None and len(fetch_result.df) >= 60:
@@ -663,8 +841,15 @@ class DailyScreener:
                     summary['skipped_symbols'].append({
                         'symbol': symbol,
                         'status': fetch_result.status,
+                        'provider': fetch_result.provider,
                         'message': fetch_result.message,
+                        'skip_reason': fetch_result.skip_reason or 'insufficient_ohlcv_rows',
+                        'provider_attempts': fetch_result.provider_attempts,
+                        'fallback_attempted': fetch_result.fallback_attempted,
+                        'is_retriable': fetch_result.is_retriable,
                     })
+                    reason = fetch_result.skip_reason or 'insufficient_ohlcv_rows'
+                    summary['skip_reasons'][reason] = summary['skip_reasons'].get(reason, 0) + 1
             if result:
                 results.append(result)
                 print(f"✅ score={result['total_score']:.2f} "
@@ -678,9 +863,15 @@ class DailyScreener:
 
         if summary['total_symbols'] > 0:
             summary['coverage_ratio'] = summary['valid_symbols'] / summary['total_symbols']
+        summary['top_error_types'] = summarize_error_types(summary)
+        summary['current_data_mode'] = compute_current_data_mode(
+            summary,
+            critical_coverage_ratio=self.critical_coverage_ratio,
+        )
         summary['provider_health_summary'] = build_provider_health_summary(summary)
         self.last_run_summary = summary
         print(summary['provider_health_summary'])
+        self._persist_provider_health()
 
         if not results:
             print("❌ 無有效結果")
@@ -689,6 +880,27 @@ class DailyScreener:
         df = pd.DataFrame(results)
         df = df.sort_values('total_score', ascending=False).reset_index(drop=True)
         return df
+
+    def _latest_valid_recommendation_time(self):
+        try:
+            from sqlalchemy import text as sql_text
+
+            db = self._get_fallback_db()
+            with db.engine.connect() as conn:
+                return conn.execute(sql_text("SELECT MAX(scan_date) FROM daily_recommendations")).scalar()
+        except Exception:
+            return None
+
+    def _persist_provider_health(self):
+        try:
+            db = self._get_fallback_db()
+            persist_provider_health(
+                db.engine,
+                self.last_run_summary,
+                last_valid_recommendation_time=self._latest_valid_recommendation_time(),
+            )
+        except Exception as exc:
+            print(f"[provider-health-persist-warning] {exc}")
 
     # ----------------------------------------------------------
     # Top N 推薦
@@ -719,6 +931,7 @@ class DailyScreener:
                 'peg': row['peg'],
                 'dupont': row['dupont'],
             }
+            swing_metadata = row.get('swing_ranking') or strategy_details.get('swing_ranking') or {}
             insider_sentiment = str(row.get('insider_sentiment') or 'NEUTRAL').upper()
             rec = {
                 'rank': rank,
@@ -751,8 +964,24 @@ class DailyScreener:
                 'sell_price': self._normalize_optional_number(row.get('sell_price')),
                 'valuation_status': str(row.get('valuation_status') or 'FAIR').upper(),
                 'strategy_details': strategy_details,
+                'score': swing_metadata.get('score', row['total_score']),
+                'setup_type': swing_metadata.get('setup_type'),
+                'trend_score': swing_metadata.get('trend_score'),
+                'momentum_score': swing_metadata.get('momentum_score'),
+                'setup_score': swing_metadata.get('setup_score'),
+                'volatility_score': swing_metadata.get('volatility_score'),
+                'risk_score': swing_metadata.get('risk_score'),
+                'liquidity_score': swing_metadata.get('liquidity_score'),
+                'reasons': list(swing_metadata.get('reasons') or []),
+                'risk_flags': list(swing_metadata.get('risk_flags') or []),
+                'stop_loss_price': swing_metadata.get('stop_loss_price'),
+                'risk_percent': swing_metadata.get('risk_percent'),
             }
-            rec['reason_summary'] = self._build_reason_summary(strategy_details, insider_sentiment)
+            rec['reason_summary'] = (
+                ' | '.join(rec['reasons'][:3])
+                if rec['reasons']
+                else self._build_reason_summary(strategy_details, insider_sentiment)
+            )
             recommendations.append(rec)
 
         return recommendations
@@ -765,16 +994,31 @@ class DailyScreener:
         summary = self.last_run_summary or {}
         coverage_ratio = float(summary.get('coverage_ratio', 0.0) or 0.0)
         minimum_ratio = float(summary.get('minimum_coverage_ratio', self.minimum_coverage_ratio) or 0.0)
+        critical_ratio = float(summary.get('critical_coverage_ratio', self.critical_coverage_ratio) or 0.0)
 
         if not recommendations:
             return False, 'no recommendations generated'
 
-        if coverage_ratio < minimum_ratio:
+        if coverage_ratio < critical_ratio:
             return False, (
-                f'insufficient coverage_ratio={coverage_ratio:.2f} '
+                f'critical provider coverage_ratio={coverage_ratio:.2f} '
+                f'critical_coverage_ratio={critical_ratio:.2f}; preserving previous recommendations'
+            )
+
+        if summary.get('current_data_mode') == DATA_MODE_FAILED:
+            return False, 'failed provider health; preserving previous recommendations'
+
+        if summary.get('critical_stale_fallback') or summary.get('max_stale_age_exceeded'):
+            return False, 'stale fallback exceeds screener policy; preserving previous recommendations'
+
+        if coverage_ratio < minimum_ratio:
+            summary['degraded'] = True
+            return True, (
+                f'degraded coverage_ratio={coverage_ratio:.2f} '
                 f'minimum_coverage_ratio={minimum_ratio:.2f}'
             )
 
+        summary['degraded'] = False
         return True, 'coverage threshold met'
 
     def _save_to_db_legacy(self, recommendations: List[Dict], scan_date: date = None):
@@ -785,6 +1029,7 @@ class DailyScreener:
             self.last_run_summary['provider_health_summary'] = build_provider_health_summary(self.last_run_summary)
             print(f"[screener-write-skipped] reason={reason}")
             print(self.last_run_summary['provider_health_summary'])
+            self._persist_provider_health()
             return False
         """
         將推薦結果寫入 daily_recommendations 表
@@ -857,6 +1102,7 @@ class DailyScreener:
             self.last_run_summary['provider_health_summary'] = build_provider_health_summary(self.last_run_summary)
             print(f"[screener-write-complete] recommendations={len(recommendations)} scan_date={scan_date}")
             print(self.last_run_summary['provider_health_summary'])
+            self._persist_provider_health()
             return True
 
             # 寫入推薦結果 (UPSERT)
@@ -961,6 +1207,7 @@ class DailyScreener:
             self.last_run_summary['provider_health_summary'] = build_provider_health_summary(self.last_run_summary)
             print(f"[screener-write-skipped] reason={reason}")
             print(self.last_run_summary['provider_health_summary'])
+            self._persist_provider_health()
             return False
 
         from adapters.database import DatabaseAdapter
@@ -1126,12 +1373,14 @@ class DailyScreener:
             self.last_run_summary['provider_health_summary'] = build_provider_health_summary(self.last_run_summary)
             print(f"[screener-write-complete] recommendations={len(recommendations)} scan_date={scan_date}")
             print(self.last_run_summary['provider_health_summary'])
+            self._persist_provider_health()
             return True
         except Exception as e:
             print(f"DB write failed: {e}")
             self.last_run_summary['recommendations_written'] = False
             self.last_run_summary['write_blocked_reason'] = str(e)
             self.last_run_summary['provider_health_summary'] = build_provider_health_summary(self.last_run_summary)
+            self._persist_provider_health()
             return False
         finally:
             db.close()
