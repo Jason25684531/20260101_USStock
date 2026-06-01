@@ -22,11 +22,12 @@ import re
 import threading
 import requests as http_requests
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Callable
 from datetime import datetime
 from flask import Blueprint, request, abort, jsonify
 from functools import wraps
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError, OperationalError
 
 from security import get_secret
 from db import get_engine, table_exists as _table_exists, column_exists as _column_exists
@@ -51,11 +52,13 @@ from screener.presentation_utils import safe_float as _shared_safe_float
 try:
     from utils.line_flex import (
         build_decision_bubble as _build_decision_bubble,
+        build_recommendation_flex_message as _build_recommendation_flex_message,
         sanitize_line_message as _sanitize_line_message,
     )  # type: ignore[reportMissingImports]
 except ImportError:
     _line_flex_module = importlib.import_module('utils.line_flex')
     _build_decision_bubble = _line_flex_module.build_decision_bubble
+    _build_recommendation_flex_message = _line_flex_module.build_recommendation_flex_message
     _sanitize_line_message = _line_flex_module.sanitize_line_message
 
 from . import flex_messages
@@ -86,6 +89,58 @@ def _get_db_engine():
     if _db_engine is None:
         _db_engine = get_engine()
     return _db_engine
+
+
+def _is_stale_mysql_connection_error(error: Exception) -> bool:
+    message = str(error).lower()
+    stale_markers = (
+        "mysql connection not available",
+        "server has gone away",
+        "lost connection",
+        "connection was killed",
+        "connection reset",
+        "connection refused",
+        "can't connect to mysql server",
+    )
+    return isinstance(error, (OperationalError, DBAPIError)) and any(marker in message for marker in stale_markers)
+
+
+def _dispose_db_engine(engine) -> None:
+    global _db_engine
+    try:
+        engine.dispose()
+    except Exception:
+        pass
+    if engine is _db_engine:
+        _db_engine = None
+
+
+def _execute_linebot_read(command_name: str, reader: Callable) -> object:
+    last_error: Exception | None = None
+    for attempt in range(2):
+        engine = _get_db_engine()
+        try:
+            with engine.connect() as conn:
+                return reader(conn)
+        except Exception as error:
+            last_error = error
+            if _is_stale_mysql_connection_error(error) and attempt == 0:
+                _log_linebot(f"LineBot command={command_name} stale DB connection; retrying once")
+                _dispose_db_engine(engine)
+                continue
+            raise
+    raise last_error or RuntimeError("LineBot DB read failed")
+
+
+def _linebot_db_unavailable_message(command_name: str) -> str:
+    return (
+        f"{command_name} 資料庫暫時無法連線，已避免使用失效連線重試。"
+        "請稍後再試，或檢查 MySQL / Docker 服務與資料庫連線狀態。"
+    )
+
+
+def _is_database_unavailable_error(error: Exception) -> bool:
+    return _is_stale_mysql_connection_error(error) or isinstance(error, (OperationalError, DBAPIError))
 
 
 def _json_loads_safe(value, default=None):
@@ -1471,73 +1526,76 @@ def _cmd_market() -> List[dict]:
 # /history MMDD: 歷史推薦
 # ============================================
 def _cmd_history(date_str: Optional[str] = None) -> List[dict]:
-    """查詢歷史推薦日期列表或指定日期的推薦"""
+    """Query persisted historical recommendations with stale-connection retry."""
     try:
         from sqlalchemy import text as sql_text
-        engine = _get_db_engine()
 
-        with engine.connect() as conn:
+        def read_history(conn):
             if date_str:
-                # Parse MMDD or YYYYMMDD
                 now = datetime.now()
                 if len(date_str) == 4:
                     target = f"{now.year}-{date_str[:2]}-{date_str[2:]}"
                 elif len(date_str) == 8:
                     target = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:]}"
                 else:
-                    target = date_str  # assume YYYY-MM-DD
+                    target = date_str
 
                 rows = conn.execute(sql_text("""
                     SELECT symbol, rank_position, signal_type, total_score, ml_confidence
                     FROM daily_recommendations
                     WHERE scan_date = :d
                     ORDER BY rank_position ASC LIMIT 10
-                """), {'d': target})
+                """), {"d": target})
+                return "rows", target, [r for r in rows]
 
-                recs = [r for r in rows]
-                if not recs:
-                    return [_text_msg(f"📅 {target} 無推薦資料")]
+            dates = conn.execute(sql_text("""
+                SELECT DISTINCT scan_date FROM daily_recommendations
+                ORDER BY scan_date DESC LIMIT 10
+            """))
+            return "dates", None, [str(r[0]) for r in dates]
 
-                lines = [f"📅 {target} 推薦:", ""]
-                for r in recs:
-                    ml = f"{float(r[4])*100:.0f}%" if r[4] else "—"
-                    lines.append(f"  #{r[1]} {r[0]} | {r[2]} | 分:{float(r[3]):.1f} | ML:{ml}")
+        result_type, target, values = _execute_linebot_read("/history", read_history)
 
-                text_fallback = "\n".join(lines)
-                try:
-                    return [flex_messages.build_history_recommendation_message(target, [
-                        {
-                            "symbol": r[0],
-                            "rank": r[1],
-                            "signal": r[2],
-                            "total_score": float(r[3]) if r[3] is not None else None,
-                            "ml_confidence": float(r[4]) if r[4] is not None else None,
-                        }
-                        for r in recs
-                    ])]
-                except Exception as flex_error:
-                    _log_linebot(f"/history flex build failed for {target}: {flex_error}")
-                    return [_text_msg(text_fallback)]
-            else:
-                # List recent dates
-                dates = conn.execute(sql_text("""
-                    SELECT DISTINCT scan_date FROM daily_recommendations
-                    ORDER BY scan_date DESC LIMIT 10
-                """))
-                date_list = [str(r[0]) for r in dates]
+        if result_type == "rows":
+            recs = values
+            if not recs:
+                return [_text_msg(f"{target} 沒有歷史推薦資料。")]
 
-                if not date_list:
-                    return [_text_msg("📅 尚無歷史推薦資料")]
+            lines = [f"{target} 歷史推薦:", ""]
+            for r in recs:
+                ml = f"{float(r[4]) * 100:.0f}%" if r[4] else "N/A"
+                lines.append(f"#{r[1]} {r[0]} | {r[2]} | Score {float(r[3]):.1f} | ML:{ml}")
+            text_fallback = "\n".join(lines)
+            try:
+                return [flex_messages.build_history_recommendation_message(target, [
+                    {
+                        "symbol": r[0],
+                        "rank": r[1],
+                        "signal": r[2],
+                        "total_score": float(r[3]) if r[3] is not None else None,
+                        "ml_confidence": float(r[4]) if r[4] is not None else None,
+                    }
+                    for r in recs
+                ])]
+            except Exception as flex_error:
+                _log_linebot(f"/history flex build failed for {target}: {flex_error}")
+                return [_text_msg(text_fallback)]
 
-                msg = "📅 歷史推薦日期:\n\n"
-                for d in date_list:
-                    msg += f"  • {d}\n"
-                msg += "\n💡 輸入 /history 0214 查看特定日期"
-                return [_text_msg(msg)]
+        date_list = values
+        if not date_list:
+            return [_text_msg("目前沒有歷史推薦資料。")]
+
+        msg = "可查詢的歷史推薦日期:\n\n"
+        for d in date_list:
+            msg += f"  {d}\n"
+        msg += "\n輸入 /history 0214 查看特定日期"
+        return [_text_msg(msg)]
 
     except Exception as e:
-        _log_linebot(f"❌ /history 查詢失敗: {e}")
-        return [_text_msg(f"❌ 歷史推薦查詢失敗: {e}")]
+        _log_linebot(f"/history lookup failed: {type(e).__name__}: {e}")
+        if _is_database_unavailable_error(e):
+            return [_text_msg(_linebot_db_unavailable_message("歷史推薦"))]
+        return [_text_msg("歷史推薦查詢失敗，請稍後再試。")]
 
 
 # ============================================
@@ -1816,12 +1874,11 @@ def _cmd_default_recommendations() -> List[dict]:
     """Default XGBoost route with final smart-money quality filters."""
     try:
         from sqlalchemy import text as sql_text
-        engine = _get_db_engine()
 
-        with engine.connect() as conn:
+        def read_recommendations(conn):
             latest = _latest_recommendation_date(conn)
             if not latest:
-                return [_text_msg("📊 尚無選股推薦資料，請先執行每日推薦流程。")]
+                return latest, [], _empty_provider_health()
 
             select_columns = _daily_recommendation_select_columns(conn)
             rows = conn.execute(sql_text(f"""
@@ -1830,39 +1887,39 @@ def _cmd_default_recommendations() -> List[dict]:
                 WHERE scan_date = :d
                 ORDER BY ml_confidence DESC, total_score DESC, rank_position ASC
                 LIMIT 30
-            """), {'d': str(latest)}).mappings()
+            """), {"d": str(latest)}).mappings()
 
             recs = []
             for row in rows:
-                news_sentiment = _safe_float(row.get('news_sentiment'))
-                whale_held_pct = _safe_float(row.get('whale_held_pct'))
+                news_sentiment = _safe_float(row.get("news_sentiment"))
+                whale_held_pct = _safe_float(row.get("whale_held_pct"))
                 if news_sentiment is not None and news_sentiment < 0:
                     continue
                 if whale_held_pct is not None and whale_held_pct == 0:
                     continue
-                recs.append(_row_to_recommendation(conn, row, rank=len(recs) + 1, reason_prefix='XGBoost 綜合大腦'))
+                recs.append(_row_to_recommendation(conn, row, rank=len(recs) + 1, reason_prefix="XGBoost"))
                 if len(recs) >= 5:
                     break
-
-            if not recs:
-                return [_text_msg("📊 目前沒有通過新聞情緒與籌碼濾網的推薦標的。")]
-
-            flex = _build_top5_flex(recs, f"{str(latest)} XGBoost+籌碼濾網")
-            flex["quickReply"] = _recommendation_quick_reply(recs)
             provider_health = _load_latest_provider_health(conn)
-            if _provider_health_is_degraded(provider_health):
-                flex = flex_messages.build_recommendations_carousel(
-                    recs,
-                    f"{str(latest)} XGBoost recommendations",
-                    degraded=True,
-                )
-                flex["quickReply"] = _recommendation_quick_reply(recs)
-                return [_text_msg(_provider_health_text(provider_health)), flex]
-            return [flex]
+            return latest, recs, provider_health
+
+        latest, recs, provider_health = _execute_linebot_read("recommendations", read_recommendations)
+        if not latest:
+            return [_text_msg("目前沒有推薦資料，請先執行每日選股流程。")]
+        if not recs:
+            return [_text_msg("目前沒有符合條件的推薦標的。")]
+
+        flex = _build_top5_flex(recs, f"{str(latest)} XGBoost recommendations")
+        flex["quickReply"] = _recommendation_quick_reply(recs)
+        if _provider_health_is_degraded(provider_health):
+            return [_text_msg(_provider_health_text(provider_health)), flex]
+        return [flex]
 
     except Exception as e:
-        _log_linebot(f"Default recommendation lookup failed: {e}")
-        return [_text_msg(f"❌ 推薦查詢失敗: {e}")]
+        _log_linebot(f"Default recommendation lookup failed: {type(e).__name__}: {e}")
+        if _is_database_unavailable_error(e):
+            return [_text_msg(_linebot_db_unavailable_message("推薦查詢"))]
+        return [_text_msg("推薦查詢失敗，請稍後再試。")]
 
 
 def _cmd_momentum_recommendations() -> List[dict]:
@@ -2004,91 +2061,47 @@ def _cmd_institutional_recommendations() -> List[dict]:
 
 
 def _cmd_top5() -> List[dict]:
-    """查詢 DB 最新 Top 5 推薦，回傳 Flex Carousel"""
+    """Query persisted Top 5 recommendations with stale-connection retry."""
     try:
         from sqlalchemy import text as sql_text
-        engine = _get_db_engine()
 
-        with engine.connect() as conn:
+        def read_top5(conn):
             latest = conn.execute(sql_text(
                 "SELECT MAX(scan_date) FROM daily_recommendations"
             )).scalar()
-
             if not latest:
-                return [_text_msg(
-                    "📊 尚無選股推薦資料\n\n"
-                    "請先執行:\n"
-                    "python strategies/scripts/run_daily_screener.py --save-db"
-                )]
+                return latest, []
 
-            rows = conn.execute(sql_text("""
-                SELECT symbol, rank_position, signal_type, total_score,
-                       current_price, target_price, ml_confidence,
-                       institutional_ownership, insider_sentiment,
-                       institutional_pass, money_flow_pass,
-                       valuation_status, buy_price, sell_price, reason_summary,
-                       support_1, resistance_1,
-                       breakout_pass, acceleration_pass, peg_pass, dupont_pass,
-                       strategy_details
+            select_columns = _daily_recommendation_select_columns(conn)
+            rows = conn.execute(sql_text(f"""
+                SELECT {select_columns}
                 FROM daily_recommendations
                 WHERE scan_date = :d
                 ORDER BY rank_position ASC
                 LIMIT 5
-            """), {'d': str(latest)}).mappings()
+            """), {"d": str(latest)}).mappings()
+            recs = [_row_to_recommendation(conn, row) for row in rows]
+            return latest, recs
 
-            recs = []
-            for row in rows:
-                institutional_pass = bool(row['institutional_pass']) if row['institutional_pass'] is not None else None
-                money_flow_pass = bool(row['money_flow_pass']) if row['money_flow_pass'] is not None else None
-                today_flow = _build_today_flow_snapshot(conn, row['symbol'], money_flow_pass=money_flow_pass)
-                rec = {
-                    'symbol': row['symbol'],
-                    'rank': row['rank_position'],
-                    'signal': row['signal_type'],
-                    'total_score': float(row['total_score']) if row['total_score'] else 0,
-                    'current_price': float(row['current_price']) if row['current_price'] else 0,
-                    'target_price': float(row['target_price']) if row['target_price'] is not None else None,
-                    'ml_confidence': float(row['ml_confidence']) if row['ml_confidence'] else 0,
-                    'institutional_ownership': float(row['institutional_ownership']) if row['institutional_ownership'] is not None else None,
-                    'insider_sentiment': row['insider_sentiment'] or 'NEUTRAL',
-                    'institutional_pass': institutional_pass,
-                    'money_flow_pass': money_flow_pass,
-                    'smart_money_trend': _build_smart_money_trend(institutional_pass, money_flow_pass, row['insider_sentiment']),
-                    'today_flow': today_flow,
-                    'valuation_status': row['valuation_status'] or 'FAIR',
-                    'buy_price': float(row['buy_price']) if row['buy_price'] is not None else None,
-                    'sell_price': float(row['sell_price']) if row['sell_price'] is not None else None,
-                    'reason_summary': row['reason_summary'] or '綜合訊號中性，待更多確認',
-                    'support_1': float(row['support_1']) if row['support_1'] else None,
-                    'resistance_1': float(row['resistance_1']) if row['resistance_1'] else None,
-                    'breakout_pass': bool(row['breakout_pass']),
-                    'acceleration_pass': bool(row['acceleration_pass']),
-                    'peg_pass': bool(row['peg_pass']),
-                    'dupont_pass': bool(row['dupont_pass']),
-                }
-                rec.update(normalize_swing_ranking_metadata(
-                    row.get('strategy_details'),
-                    fallback_score=rec['total_score'],
-                    rank=rec['rank'],
-                ))
-                recs.append(rec)
+        latest, recs = _execute_linebot_read("top5", read_top5)
 
-            if not recs:
-                return [_text_msg("📊 該日期無推薦資料")]
+        if not latest:
+            return [_text_msg(
+                "目前沒有推薦資料。\n\n"
+                "請先執行: python strategies/scripts/run_daily_screener.py --save-db"
+            )]
+        if not recs:
+            return [_text_msg("最新日期沒有可用推薦資料。")]
 
-            # Build Flex message + Quick Reply for individual stock lookup
-            flex = _build_top5_flex(recs, str(latest))
-            quick_items = [
-                {"type": "action", "action": {"type": "message", "label": f"🔍{r['symbol']}", "text": f"/stock {r['symbol']}"}}
-                for r in recs[:5]
-            ]
-            quick_items.append({"type": "action", "action": {"type": "message", "label": "🌍 宏觀", "text": "/market"}})
-            flex["quickReply"] = {"items": quick_items}
-            return [flex]
+        flex = _build_top5_flex(recs, str(latest))
+        flex["quickReply"] = _recommendation_quick_reply(recs)
+        return [flex]
 
     except Exception as e:
-        _log_linebot(f"❌ Top5 查詢失敗: {e}")
-        return [_text_msg(f"❌ 查詢失敗: {e}")]
+        _log_linebot(f"Top5 lookup failed: {type(e).__name__}: {e}")
+        if _is_database_unavailable_error(e):
+            return [_text_msg(_linebot_db_unavailable_message("Top5"))]
+        return [_text_msg("Top5 查詢失敗，請稍後再試。")]
 
 
 # ============================================
@@ -2284,9 +2297,10 @@ def _cmd_ml(symbol: str) -> List[dict]:
 # ============================================
 def _build_top5_flex(recs: list, scan_date: str) -> dict:
     """Build Top recommendation Flex Carousel."""
-    return flex_messages.build_recommendations_carousel(
+    return _build_recommendation_flex_message(
         recs,
-        f"Top {len(recs)} recommendations {scan_date}",
+        title=f"Top {len(recs)} recommendations {scan_date}",
+        limit=10,
     )
 
 

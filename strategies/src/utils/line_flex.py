@@ -21,6 +21,12 @@ STATUS_STYLE_MAP = {
     "PREMIUM_GROWTH": (FAIR_LABEL, FAIR_COLOR),
     "OVERVALUED": ("OVERVALUED", "#FF1744"),
 }
+DAILY_STATUS_STYLE_MAP = {
+    "UNDERVALUED": ("UNDERVALUED", "#0B6E4F"),
+    "FAIR": (FAIR_LABEL, "#A16207"),
+    "PREMIUM_GROWTH": (FAIR_LABEL, "#A16207"),
+    "OVERVALUED": ("OVERVALUED", "#B42318"),
+}
 
 
 def _safe_text(value: Any, fallback: str = "N/A") -> str:
@@ -281,6 +287,87 @@ def format_first_items(values, limit: int = 3) -> str:
     parts = [_safe_text(value, "") for value in values[:limit]]
     parts = [part for part in parts if part]
     return " / ".join(parts) if parts else "N/A"
+
+
+def _first_present(rec: Mapping, *keys: str):
+    for key in keys:
+        value = rec.get(key)
+        if value is None:
+            continue
+        try:
+            if pd.isna(value):
+                continue
+        except (TypeError, ValueError):
+            pass
+        return value
+    return None
+
+
+def _format_score(value) -> str:
+    numeric = _safe_number(value)
+    if numeric is None:
+        return "N/A"
+    return f"{numeric:.2f}"
+
+
+def _format_allocation(value) -> str:
+    numeric = _safe_number(value)
+    if numeric is None:
+        return "N/A"
+    if abs(numeric) <= 1:
+        numeric *= 100
+    return f"{numeric:.1f}%"
+
+
+def _daily_valuation_style(rec: Mapping) -> tuple[str, str]:
+    valuation_status = _safe_text(rec.get("valuation_status"), "FAIR").upper()
+    label, color = DAILY_STATUS_STYLE_MAP.get(valuation_status, DAILY_STATUS_STYLE_MAP["FAIR"])
+    return label, _safe_color(color, DAILY_STATUS_STYLE_MAP["FAIR"][1])
+
+
+def normalize_recommendation_for_flex(rec: Mapping) -> dict[str, Any]:
+    normalized = dict(rec)
+    score = _first_present(rec, "xgboost_score", "ai_score", "score", "total_score")
+    if normalized.get("score") is None:
+        normalized["score"] = score
+    if normalized.get("total_score") is None:
+        normalized["total_score"] = score
+    normalized["reason_summary"] = _first_present(rec, "ai_reason", "reason_summary", "reason") or "No AI summary"
+    normalized["suggested_allocation_pct"] = _first_present(
+        rec,
+        "suggested_allocation_pct",
+        "allocation_pct",
+        "allocation",
+    )
+    normalized["buy_price"] = _first_present(rec, "buy_price", "buy_below")
+    normalized["valuation_status"] = _first_present(rec, "valuation_status") or "FAIR"
+    return normalized
+
+
+def build_recommendation_bubble(rec: Mapping) -> dict:
+    rec = normalize_recommendation_for_flex(rec)
+    return build_decision_bubble(rec)
+
+
+def build_recommendation_flex_message(
+    recommendations: list[Mapping] | tuple[Mapping, ...] | Any,
+    title: str = "Daily Screener",
+    limit: int = 5,
+) -> dict:
+    rows = list(recommendations or [])[:limit]
+    bubbles = [build_recommendation_bubble(row) for row in rows]
+    if not bubbles:
+        bubbles = [build_recommendation_bubble({"symbol": "N/A", "reason_summary": "No recommendations"})]
+    return sanitize_line_message(
+        {
+            "type": "flex",
+            "altText": _safe_text(f"{title} Top {len(bubbles)}", "Daily Screener"),
+            "contents": {
+                "type": "carousel",
+                "contents": bubbles,
+            },
+        }
+    )
 
 
 def build_decision_bubble(rec: Mapping) -> dict:

@@ -29,6 +29,7 @@ if _STRATEGIES_SRC_STR not in sys.path:
 try:
     from utils.line_flex import (
         build_decision_bubble,
+        build_recommendation_flex_message,
         flex_kv,
         format_currency,
         sanitize_line_message,
@@ -37,6 +38,7 @@ try:
 except ImportError:
     from strategies.src.utils.line_flex import (
         build_decision_bubble,
+        build_recommendation_flex_message,
         flex_kv,
         format_currency,
         sanitize_line_message,
@@ -236,64 +238,31 @@ class LineNotifier:
 
     # ===========================================================
     # Flex Message 每日推薦報告
-    # ===========================================================
-
     def send_flex_report(self, recommendations: List[Dict]) -> bool:
-        """
-        發送 Flex Message 格式的每日選股推薦報告
-
-        Args:
-            recommendations: get_top_recommendations() 的結果列表
-                每個 dict 需包含: rank, symbol, signal, total_score,
-                current_price, ml_confidence, support_1, resistance_1,
-                breakout_pass, acceleration_pass, peg_pass, dupont_pass
-
-        Returns:
-            是否發送成功
-        """
+        """Send recommendation Flex cards using the shared canonical builder."""
         if not recommendations:
-            return self.send_text("📊 今日無推薦標的")
-
-        bubbles = [self._build_stock_bubble(rec) for rec in recommendations[:10]]
+            return self.send_text("No recommendations available.")
 
         scan_date = date.today().strftime('%Y/%m/%d')
-        flex_message = {
-            "type": "flex",
-            "altText": f"📊 每日選股推薦 Top {len(recommendations)} — {scan_date}",
-            "contents": {
-                "type": "carousel",
-                "contents": bubbles,
-            }
-        }
+        flex_message = build_recommendation_flex_message(
+            recommendations,
+            title=f"Daily recommendations {scan_date}",
+            limit=10,
+        )
 
         return self._send_message([flex_message])
 
     def build_daily_screener_flex(self, top_n_df: pd.DataFrame) -> Dict:
-        """將 ml_strategy 的 Top N DataFrame 轉為每日情報 Flex Carousel。"""
+        """Build the daily screener Flex carousel with the shared canonical builder."""
         if top_n_df is None or top_n_df.empty:
-            return {
-                "type": "flex",
-                "altText": "📊 今日無推薦標的",
-                "contents": {
-                    "type": "bubble",
-                    "body": {
-                        "type": "box",
-                        "layout": "vertical",
-                        "contents": [{"type": "text", "text": "今日無推薦標的", "weight": "bold"}],
-                    },
-                },
-            }
+            return build_recommendation_flex_message([], title="Daily Screener", limit=5)
 
-        bubbles = [self._build_daily_screener_bubble(record) for record in top_n_df.to_dict(orient="records")[:5]]
         latest_date = str(top_n_df["latest_date"].iloc[0]) if "latest_date" in top_n_df.columns else date.today().isoformat()
-        return {
-            "type": "flex",
-            "altText": f"📊 每日情報 Top {len(bubbles)} — {latest_date}",
-            "contents": {
-                "type": "carousel",
-                "contents": bubbles,
-            },
-        }
+        return build_recommendation_flex_message(
+            top_n_df.to_dict(orient="records"),
+            title=f"Daily Screener {latest_date}",
+            limit=5,
+        )
 
     def send_daily_screener_flex(self, top_n_df: pd.DataFrame) -> bool:
         """Push the daily screener Flex payload; dry-run when LINE credentials are missing."""

@@ -172,8 +172,82 @@ def test_daily_screener_flex_is_null_safe_for_premium_growth():
             if color_key in node:
                 color_values.append(node[color_key])
 
-    assert bubble["header"]["backgroundColor"] == "#A16207"
+    assert bubble["header"]["backgroundColor"] == "#FFA000"
     assert "FAIR" in bubble["header"]["contents"][1]["text"]
     assert any(value == "N/A" for value in text_values)
     assert all(isinstance(value, str) and value.strip() for value in text_values)
     assert all(isinstance(color, str) and HEX_COLOR_RE.match(color) for color in color_values)
+
+
+def test_canonical_recommendation_flex_accepts_daily_and_command_shapes():
+    from utils.line_flex import build_recommendation_flex_message
+
+    daily_message = build_recommendation_flex_message(
+        [
+            {
+                "symbol": "NVDA",
+                "latest_date": "2026-05-15",
+                "xgboost_score": 0.72,
+                "valuation_status": "PREMIUM_GROWTH",
+                "buy_price": 118.0,
+                "suggested_allocation_pct": 7.5,
+                "ai_reason": "Daily morning setup",
+            }
+        ],
+        title="Daily Screener",
+    )
+    command_message = build_recommendation_flex_message(
+        [
+            {
+                "symbol": "NVDA",
+                "rank": 1,
+                "total_score": 86.4,
+                "score": 86.4,
+                "setup_type": "breakout",
+                "reasons": ["Close broke above the 20-day high"],
+                "risk_flags": ["Close is extended above MA20"],
+                "valuation_status": "PREMIUM_GROWTH",
+                "buy_price": 118.0,
+                "suggested_allocation_pct": 7.5,
+                "reason_summary": "Daily morning setup",
+            }
+        ],
+        title="Command Top5",
+    )
+
+    for message in (daily_message, command_message):
+        payload = json.dumps(message, ensure_ascii=False)
+        assert "Decision" in payload
+        assert "Price / Target" in payload
+        assert "Buy Below" in payload
+        assert "Smart Money / AI" in payload
+        assert "Reason" in payload
+        assert "FAIR" in payload
+
+    assert "breakout" in json.dumps(command_message, ensure_ascii=False)
+    assert "AI Score" not in json.dumps(command_message, ensure_ascii=False)
+
+
+def test_canonical_recommendation_flex_sanitizes_invalid_values():
+    from utils.line_flex import build_recommendation_flex_message
+
+    message = build_recommendation_flex_message(
+        [
+            {
+                "symbol": "NVDA",
+                "xgboost_score": math.nan,
+                "total_score": float("inf"),
+                "valuation_status": "EXPERIMENTAL_STATUS",
+                "buy_price": float("-inf"),
+                "suggested_allocation_pct": math.nan,
+                "ai_reason": "x" * 500,
+            }
+        ],
+        title="Invalid Samples",
+    )
+
+    payload = json.dumps(message, ensure_ascii=False)
+    assert "NaN" not in payload
+    assert "Infinity" not in payload
+    assert "Decision" in payload
+    assert "N/A" in payload

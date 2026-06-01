@@ -5,6 +5,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+from sqlalchemy.exc import OperationalError
+
 
 ROOT = Path(__file__).resolve().parents[2]
 WEB_DIR = ROOT / "web"
@@ -18,6 +20,89 @@ os.environ["WEB_DISABLE_AUTH"] = "true"
 sys.modules.setdefault("yfinance", SimpleNamespace())
 
 from bot import handler as linebot_handler
+
+
+class _FakeResult:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def mappings(self):
+        return self._rows
+
+    def __iter__(self):
+        return iter(self._rows)
+
+
+class _FakeScalarResult:
+    def __init__(self, value):
+        self._value = value
+
+    def scalar(self):
+        return self._value
+
+
+class _FakeConnection:
+    def __init__(self, execute_results):
+        self._execute_results = list(execute_results)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def execute(self, *args, **kwargs):
+        result = self._execute_results.pop(0)
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+
+class _FakeEngine:
+    def __init__(self, connections):
+        self._connections = list(connections)
+        self.dispose_count = 0
+
+    def connect(self):
+        return self._connections.pop(0)
+
+    def dispose(self):
+        self.dispose_count += 1
+
+
+def _stale_mysql_error():
+    return OperationalError(
+        "SELECT MAX(scan_date) FROM daily_recommendations",
+        {},
+        Exception("MySQL Connection not available."),
+    )
+
+
+def _top5_row():
+    return {
+        "symbol": "NVDA",
+        "rank_position": 1,
+        "signal_type": "BUY",
+        "total_score": 86.4,
+        "current_price": 123.0,
+        "target_price": 140.0,
+        "ml_confidence": 0.91,
+        "institutional_ownership": 0.72,
+        "insider_sentiment": "NEUTRAL",
+        "institutional_pass": 1,
+        "money_flow_pass": 1,
+        "valuation_status": "FAIR",
+        "buy_price": 118.0,
+        "sell_price": 150.0,
+        "reason_summary": "Daily morning setup",
+        "support_1": 118.0,
+        "resistance_1": 150.0,
+        "breakout_pass": 1,
+        "acceleration_pass": 1,
+        "peg_pass": 1,
+        "dupont_pass": 1,
+        "strategy_details": '{"swing_ranking":{"score":86.4,"setup_type":"breakout","reasons":["Close broke above the 20-day high"],"risk_flags":["Close is extended above MA20"]}}',
+    }
 
 
 class LineBotHandlerTests(unittest.TestCase):
@@ -274,6 +359,83 @@ class LineBotHandlerTests(unittest.TestCase):
         self.assertIn("recommendation_source=last_valid_snapshot", messages[0]["text"])
         self.assertIn("last_valid_recommendation_at=2026-05-20", messages[0]["text"])
         self.assertEqual(messages[1]["type"], "flex")
+
+    def test_top5_retries_stale_mysql_connection_and_returns_recommendations(self):
+        fake_engine = _FakeEngine(
+            [
+                _FakeConnection([_stale_mysql_error()]),
+                _FakeConnection([_FakeScalarResult("2026-05-28"), _FakeResult([_top5_row()])]),
+            ]
+        )
+
+        with patch.object(linebot_handler, "_get_db_engine", return_value=fake_engine), \
+             patch.object(linebot_handler, "_daily_recommendation_select_columns", return_value="symbol"), \
+             patch.object(linebot_handler, "_build_today_flow_snapshot", return_value=None):
+            messages = linebot_handler._cmd_top5()
+
+        self.assertEqual(fake_engine.dispose_count, 1)
+        self.assertEqual(messages[0]["type"], "flex")
+        self.assertIn("NVDA", str(messages[0]))
+
+    def test_history_retries_stale_mysql_connection_and_returns_rows(self):
+        fake_engine = _FakeEngine(
+            [
+                _FakeConnection([_stale_mysql_error()]),
+                _FakeConnection([_FakeResult([("NVDA", 1, "BUY", 86.4, 0.91)])]),
+            ]
+        )
+
+        with patch.object(linebot_handler, "_get_db_engine", return_value=fake_engine):
+            messages = linebot_handler._cmd_history("0528")
+
+        self.assertEqual(fake_engine.dispose_count, 1)
+        self.assertEqual(messages[0]["type"], "flex")
+        self.assertIn("NVDA", str(messages[0]))
+
+    def test_top5_persistent_database_outage_uses_safe_message(self):
+        fake_engine = _FakeEngine(
+            [
+                _FakeConnection([_stale_mysql_error()]),
+                _FakeConnection([_stale_mysql_error()]),
+            ]
+        )
+
+        with patch.object(linebot_handler, "_get_db_engine", return_value=fake_engine):
+            messages = linebot_handler._cmd_top5()
+
+        self.assertEqual(messages[0]["type"], "text")
+        self.assertIn("資料庫暫時無法連線", messages[0]["text"])
+        self.assertNotIn("SELECT", messages[0]["text"])
+        self.assertNotIn("sqlalche.me", messages[0]["text"])
+
+    def test_top5_flex_uses_daily_morning_canonical_card_labels(self):
+        flex = linebot_handler._build_top5_flex(
+            [
+                {
+                    "symbol": "NVDA",
+                    "rank": 1,
+                    "total_score": 86.4,
+                    "score": 86.4,
+                    "setup_type": "breakout",
+                    "reasons": ["Close broke above the 20-day high"],
+                    "risk_flags": ["Close is extended above MA20"],
+                    "valuation_status": "FAIR",
+                    "buy_price": 118.0,
+                    "suggested_allocation_pct": 7.5,
+                    "reason_summary": "Daily morning setup",
+                }
+            ],
+            "2026-05-28",
+        )
+
+        rendered = str(flex)
+        self.assertIn("Decision", rendered)
+        self.assertIn("Price / Target", rendered)
+        self.assertIn("Buy Below", rendered)
+        self.assertIn("Smart Money / AI", rendered)
+        self.assertIn("Reason", rendered)
+        self.assertIn("breakout", rendered)
+        self.assertNotIn("AI Score", rendered)
 
     def test_calibration_active_payload_replies(self):
         payload = {

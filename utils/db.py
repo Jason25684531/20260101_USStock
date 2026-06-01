@@ -65,4 +65,9 @@ def build_connection_string(config: Dict[str, str]) -> str:
 
 def get_engine(config: Optional[Dict[str, str]] = None, echo: bool = False, env: Optional[dict] = None) -> Engine:
     cfg = config or get_db_config(env=env)
-    return create_engine(build_connection_string(cfg), echo=echo)
+    return create_engine(
+        build_connection_string(cfg),
+        echo=echo,
+        pool_pre_ping=True,
+        pool_recycle=1800,
+    )
