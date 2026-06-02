@@ -11,11 +11,45 @@ Updated: 2026-02-12 - 新增 Flex Message 推薦報告
 """
 
 import json
+import logging
+import sys
+from pathlib import Path
 import requests
 from datetime import datetime, date
 from typing import Optional, Dict, List
 
-from utils.security import get_secret
+import pandas as pd
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[3]
+_STRATEGIES_SRC = _PROJECT_ROOT / 'strategies' / 'src'
+_STRATEGIES_SRC_STR = str(_STRATEGIES_SRC)
+if _STRATEGIES_SRC_STR not in sys.path:
+    sys.path.insert(0, _STRATEGIES_SRC_STR)
+
+try:
+    from utils.line_flex import (
+        build_decision_bubble,
+        build_recommendation_flex_message,
+        flex_kv,
+        format_currency,
+        sanitize_line_message,
+    )
+    from utils.security import get_secret
+except ImportError:
+    from strategies.src.utils.line_flex import (
+        build_decision_bubble,
+        build_recommendation_flex_message,
+        flex_kv,
+        format_currency,
+        sanitize_line_message,
+    )
+    from strategies.src.utils.security import get_secret
+
+
+logger = logging.getLogger(__name__)
+if not logger.handlers:
+    logger.addHandler(logging.StreamHandler())
+logger.setLevel(logging.DEBUG)
 
 
 class LineNotifier:
@@ -23,7 +57,7 @@ class LineNotifier:
     
     def __init__(self):
         """初始化 Line Bot 通知器"""
-        self.channel_token = get_secret('line_channel_token')
+        self.channel_token = get_secret('line_channel_access_token', default=get_secret('line_channel_token'))
         self.user_id = get_secret('line_user_id')  # 接收通知的用戶 ID
         self.api_url = "https://api.line.me/v2/bot/message/push"
         
@@ -38,29 +72,26 @@ class LineNotifier:
         return bool(self.channel_token and self.user_id)
     
     def _send_message(self, messages: list) -> bool:
-        """
-        發送消息到 Line
-        
-        Args:
-            messages: Line 消息對象列表
-            
-        Returns:
-            是否發送成功
-        """
+        """Send one or more LINE messages after payload sanitization."""
         if not self.is_enabled:
-            print("⚠️  Line 通知未啟用，跳過發送")
+            print("Line notifier is not enabled. Skip sending.")
             return False
-        
+
+        sanitized_messages = [sanitize_line_message(message) for message in messages]
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.channel_token}"
         }
-        
+
         payload = {
             "to": self.user_id,
-            "messages": messages
+            "messages": sanitized_messages
         }
-        
+
+        for message in sanitized_messages:
+            if message.get("type") == "flex":
+                logger.debug(json.dumps(message.get("contents", {}), ensure_ascii=False))
+
         try:
             response = requests.post(
                 self.api_url,
@@ -68,18 +99,19 @@ class LineNotifier:
                 json=payload,
                 timeout=10
             )
-            
-            if response.status_code == 200:
-                print(f"✅ Line 通知發送成功")
-                return True
-            else:
-                print(f"❌ Line 通知發送失敗: {response.status_code} - {response.text}")
-                return False
-                
-        except requests.RequestException as e:
-            print(f"❌ Line 通知請求失敗: {str(e)}")
+        except requests.RequestException as error:
+            logger.exception("LINE push request failed with payload=%s", json.dumps(payload, ensure_ascii=False))
+            print(f"Line push request failed: {error}")
             return False
-    
+
+        if response.status_code == 200:
+            print("Line push sent successfully.")
+            return True
+
+        logger.error("LINE push failed payload=%s", json.dumps(payload, ensure_ascii=False))
+        print(f"Line push failed: {response.status_code} - {response.text}")
+        return False
+
     def send_text(self, message: str) -> bool:
         """
         發送純文本消息
@@ -206,37 +238,106 @@ class LineNotifier:
 
     # ===========================================================
     # Flex Message 每日推薦報告
-    # ===========================================================
-
     def send_flex_report(self, recommendations: List[Dict]) -> bool:
-        """
-        發送 Flex Message 格式的每日選股推薦報告
-
-        Args:
-            recommendations: get_top_recommendations() 的結果列表
-                每個 dict 需包含: rank, symbol, signal, total_score,
-                current_price, ml_confidence, support_1, resistance_1,
-                breakout_pass, acceleration_pass, peg_pass, dupont_pass
-
-        Returns:
-            是否發送成功
-        """
+        """Send recommendation Flex cards using the shared canonical builder."""
         if not recommendations:
-            return self.send_text("📊 今日無推薦標的")
-
-        bubbles = [self._build_stock_bubble(rec) for rec in recommendations[:10]]
+            return self.send_text("No recommendations available.")
 
         scan_date = date.today().strftime('%Y/%m/%d')
-        flex_message = {
-            "type": "flex",
-            "altText": f"📊 每日選股推薦 Top {len(recommendations)} — {scan_date}",
-            "contents": {
-                "type": "carousel",
-                "contents": bubbles,
-            }
-        }
+        flex_message = build_recommendation_flex_message(
+            recommendations,
+            title=f"Daily recommendations {scan_date}",
+            limit=10,
+        )
 
         return self._send_message([flex_message])
+
+    def build_daily_screener_flex(self, top_n_df: pd.DataFrame) -> Dict:
+        """Build the daily screener Flex carousel with the shared canonical builder."""
+        if top_n_df is None or top_n_df.empty:
+            return build_recommendation_flex_message([], title="Daily Screener", limit=5)
+
+        latest_date = str(top_n_df["latest_date"].iloc[0]) if "latest_date" in top_n_df.columns else date.today().isoformat()
+        return build_recommendation_flex_message(
+            top_n_df.to_dict(orient="records"),
+            title=f"Daily Screener {latest_date}",
+            limit=5,
+        )
+
+    def send_daily_screener_flex(self, top_n_df: pd.DataFrame) -> bool:
+        """Push the daily screener Flex payload; dry-run when LINE credentials are missing."""
+        flex_message = sanitize_line_message(self.build_daily_screener_flex(top_n_df))
+        if not self.is_enabled:
+            preview = json.dumps(flex_message["contents"], ensure_ascii=False)[:400]
+            print("Line token/user id not configured. Dry-run preview:")
+            print(preview)
+            return True
+
+        return self._send_message([flex_message])
+
+    def _build_daily_screener_bubble(self, rec: Dict) -> Dict:
+        valuation_status = str(rec.get("valuation_status") or "FAIR").upper()
+        status_label_map = {
+            "UNDERVALUED": ("UNDERVALUED", "#0B6E4F"),
+            "FAIR": ("FAIR", "#A16207"),
+            "PREMIUM_GROWTH": ("FAIR", "#A16207"),
+            "OVERVALUED": ("OVERVALUED", "#B42318"),
+        }
+        status_text, header_color = status_label_map.get(valuation_status, status_label_map["FAIR"])
+
+        xgboost_score = rec.get("xgboost_score")
+        buy_price = rec.get("buy_price")
+        suggested_allocation_pct = rec.get("suggested_allocation_pct")
+        ai_reason = str(rec.get("ai_reason") or "No AI summary")[:60]
+
+        score_text = "N/A"
+        if xgboost_score is not None and not pd.isna(xgboost_score):
+            score_text = f"{float(xgboost_score):.2f}"
+
+        buy_price_text = format_currency(buy_price)
+        if buy_price_text != "N/A":
+            buy_price_text = f"< {buy_price_text}"
+
+        allocation_text = "N/A"
+        if suggested_allocation_pct is not None and not pd.isna(suggested_allocation_pct):
+            allocation_text = f"{float(suggested_allocation_pct):.1f}%"
+
+        body_rows = [
+            flex_kv("AI Score", score_text),
+            flex_kv("Buy Below", buy_price_text),
+            flex_kv("Allocation", allocation_text),
+        ]
+
+        return sanitize_line_message({
+            "type": "bubble",
+            "size": "mega",
+            "header": {
+                "type": "box",
+                "layout": "vertical",
+                "backgroundColor": header_color,
+                "paddingAll": "14px",
+                "contents": [
+                    {"type": "text", "text": str(rec.get("symbol", "N/A")), "weight": "bold", "size": "xl", "color": "#FFFFFF"},
+                    {"type": "text", "text": status_text, "size": "sm", "color": "#F9FAFB", "wrap": True, "margin": "sm"},
+                ],
+            },
+            "body": {
+                "type": "box",
+                "layout": "vertical",
+                "spacing": "md",
+                "contents": body_rows,
+                "paddingAll": "14px",
+            },
+            "footer": {
+                "type": "box",
+                "layout": "vertical",
+                "contents": [
+                    {"type": "text", "text": "AI Reason", "size": "xs", "color": "#667085", "weight": "bold"},
+                    {"type": "text", "text": ai_reason, "size": "sm", "wrap": True, "color": "#111827", "margin": "sm"},
+                ],
+                "paddingAll": "14px",
+            },
+        })
 
     def _build_stock_bubble(self, rec: Dict) -> Dict:
         """
@@ -248,92 +349,7 @@ class LineNotifier:
         Returns:
             LINE Flex Bubble JSON dict
         """
-        signal = rec.get('signal', 'N/A')
-        signal_color = "#00C853" if signal == 'BUY' else "#FF1744"
-        ml_conf = rec.get('ml_confidence', 0) or 0
-        ml_str = f"{ml_conf:.0%}" if ml_conf > 0 else "—"
-
-        # 策略通過指標
-        strats = []
-        if rec.get('breakout_pass'):
-            strats.append("突破")
-        if rec.get('acceleration_pass'):
-            strats.append("加速")
-        if rec.get('peg_pass'):
-            strats.append("PEG")
-        if rec.get('dupont_pass'):
-            strats.append("杜邦")
-
-        body_rows = [
-            self._flex_kv("💰 價格", f"${rec['current_price']:.2f}"),
-            self._flex_kv("📊 評分", f"{rec['total_score']:.1f}/5"),
-            self._flex_kv("🤖 ML 信心度", ml_str),
-            self._flex_kv("✅ 策略", " | ".join(strats) if strats else "—"),
-        ]
-
-        s1 = rec.get('support_1')
-        r1 = rec.get('resistance_1')
-        if s1:
-            body_rows.append(self._flex_kv("📉 支撐", f"${s1:.2f}"))
-        if r1:
-            body_rows.append(self._flex_kv("📈 壓力", f"${r1:.2f}"))
-
-        return {
-            "type": "bubble",
-            "size": "kilo",
-            "header": {
-                "type": "box",
-                "layout": "horizontal",
-                "contents": [
-                    {
-                        "type": "text",
-                        "text": f"#{rec.get('rank', '?')} {rec['symbol']}",
-                        "weight": "bold",
-                        "size": "lg",
-                        "color": "#FFFFFF",
-                    },
-                    {
-                        "type": "text",
-                        "text": signal,
-                        "weight": "bold",
-                        "size": "sm",
-                        "align": "end",
-                        "color": "#FFFFFF",
-                    },
-                ],
-                "backgroundColor": signal_color,
-                "paddingAll": "15px",
-            },
-            "body": {
-                "type": "box",
-                "layout": "vertical",
-                "contents": body_rows,
-                "spacing": "sm",
-                "paddingAll": "13px",
-            },
-        }
-
-    @staticmethod
-    def _flex_kv(label: str, value: str) -> Dict:
-        """
-        建構 Flex Message 鍵值對行
-
-        Args:
-            label: 左側標籤
-            value: 右側數值
-
-        Returns:
-            LINE Flex Box JSON dict
-        """
-        return {
-            "type": "box",
-            "layout": "horizontal",
-            "contents": [
-                {"type": "text", "text": label, "size": "sm", "color": "#555555", "flex": 0},
-                {"type": "text", "text": value, "size": "sm", "color": "#111111", "align": "end"},
-            ],
-        }
-
+        return build_decision_bubble(rec)
 
 # 全局通知器實例
 _notifier: Optional[LineNotifier] = None

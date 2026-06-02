@@ -3,52 +3,84 @@
    =============================================*/
 
 :root {
-    --primary-gradient: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-    --green-gradient: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
-    --pink-gradient: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
-    --orange-gradient: linear-gradient(135deg, #f7971e 0%, #ffd200 100%);
-    --blue-gradient: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
-    --dark-gradient: linear-gradient(135deg, #434343 0%, #000000 100%);
+    --primary-gradient: linear-gradient(135deg, #143726 0%, #0c1712 100%);
+    --green-gradient: linear-gradient(135deg, #0f5132 0%, #1faa59 100%);
+    --pink-gradient: linear-gradient(135deg, #5b1f2f 0%, #8c3149 100%);
+    --orange-gradient: linear-gradient(135deg, #5b3a12 0%, #a86b1f 100%);
+    --blue-gradient: linear-gradient(135deg, #12354b 0%, #16749a 100%);
+    --dark-gradient: linear-gradient(135deg, #1b1f1d 0%, #050706 100%);
+    --bg-page: #050706;
+    --bg-page-alt: #0b100d;
+    --bg-surface: #111714;
+    --bg-surface-strong: #161d19;
+    --bg-surface-muted: #1b241f;
+    --border-subtle: #26342c;
+    --text-primary: #d7e6dd;
+    --text-secondary: #93a99a;
+    --accent-green: #5df28c;
+    --accent-green-soft: #1f7a48;
+    --danger-bright: #ff6b81;
+    --warn-bright: #ffb84d;
 }
 
 body {
-    background-color: #f4f6f9;
+    background:
+        radial-gradient(circle at top, rgba(49, 120, 74, 0.18), transparent 32%),
+        linear-gradient(180deg, var(--bg-page-alt) 0%, var(--bg-page) 100%);
+    color: var(--text-primary);
     font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, 'Noto Sans TC', sans-serif;
+    min-height: 100vh;
 }
 
 /* Navbar */
 .navbar-main {
     background: var(--primary-gradient);
-    box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+    box-shadow: 0 10px 30px rgba(0,0,0,0.35);
+}
+
+.backend-status-alert {
+    background: rgba(255, 184, 77, 0.14);
+    border: 1px solid rgba(255, 184, 77, 0.45);
+    color: #ffd89a;
+    border-radius: 12px;
+    box-shadow: 0 12px 28px rgba(0,0,0,0.18);
 }
 
 /* Nav Tabs */
 .nav-tabs .nav-link {
-    color: #555;
+    color: var(--text-secondary);
     font-weight: 500;
     border: none;
     padding: 0.75rem 1.25rem;
     transition: all 0.2s;
 }
-.nav-tabs .nav-link:hover { color: #667eea; }
+.nav-tabs .nav-link:hover {
+    color: var(--accent-green);
+    background: rgba(93, 242, 140, 0.08);
+}
 .nav-tabs .nav-link.active {
-    color: #667eea;
+    color: var(--accent-green);
     font-weight: 600;
-    border-bottom: 3px solid #667eea;
+    border-bottom: 3px solid var(--accent-green);
     background: transparent;
 }
 
 /* Cards */
 .card {
-    border: none;
+    background: linear-gradient(180deg, rgba(24, 31, 27, 0.96) 0%, rgba(15, 20, 17, 0.96) 100%);
+    border: 1px solid var(--border-subtle);
     border-radius: 12px;
-    box-shadow: 0 2px 12px rgba(0,0,0,0.06);
+    box-shadow: 0 18px 40px rgba(0,0,0,0.28);
     margin-bottom: 1.25rem;
     overflow: hidden;
 }
 .card-header {
     font-weight: 600;
     border-bottom: none;
+}
+.card-body,
+.card-footer {
+    color: var(--text-primary);
 }
 .card-header-primary { background: var(--primary-gradient); color: #fff; }
 .card-header-green   { background: var(--green-gradient);   color: #fff; }
@@ -60,45 +92,506 @@ body {
 /* Stat Cards */
 .stat-card { text-align: center; padding: 1.25rem 0.75rem; }
 .stat-value { font-size: 1.75rem; font-weight: 700; margin: 0.25rem 0; }
-.stat-label { color: #6c757d; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.5px; }
+.stat-label { color: var(--text-secondary); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.5px; }
 
 /* Color helpers */
-.positive { color: #00c853 !important; }
-.negative { color: #ff1744 !important; }
-.text-warn { color: #ff9100 !important; }
+.positive { color: #5df28c !important; }
+.negative { color: #ff6b81 !important; }
+.text-warn { color: #ffb84d !important; }
 
 /* Strategy badges */
-.badge-pass { background: #00c853; color: #fff; font-size: 0.7rem; padding: 3px 7px; border-radius: 4px; }
-.badge-fail { background: #e0e0e0; color: #999; font-size: 0.7rem; padding: 3px 7px; border-radius: 4px; }
-.badge-na { background: #f3f4f6; color: #9ca3af; font-size: 0.7rem; padding: 3px 7px; border-radius: 4px; }
+.badge-pass { background: #1f7a48; color: #ecfff2; font-size: 0.7rem; padding: 3px 7px; border-radius: 4px; }
+.badge-fail { background: #3a2a2d; color: #ffbdc8; font-size: 0.7rem; padding: 3px 7px; border-radius: 4px; }
+.badge-na { background: #28312b; color: #a9bbb0; font-size: 0.7rem; padding: 3px 7px; border-radius: 4px; }
 
 /* Regime indicators */
 .regime-dot {
     display: inline-block; width: 14px; height: 14px;
     border-radius: 50%; margin-right: 6px; vertical-align: middle;
 }
-.regime-risk-on  { background: #00c853; box-shadow: 0 0 8px rgba(0,200,83,0.5); }
-.regime-neutral  { background: #ff9100; box-shadow: 0 0 8px rgba(255,145,0,0.5); }
-.regime-risk-off { background: #ff1744; box-shadow: 0 0 8px rgba(255,23,68,0.5); }
+.regime-risk-on  { background: #5df28c; box-shadow: 0 0 8px rgba(93,242,140,0.5); }
+.regime-neutral  { background: #ffb84d; box-shadow: 0 0 8px rgba(255,184,77,0.45); }
+.regime-risk-off { background: #ff6b81; box-shadow: 0 0 8px rgba(255,107,129,0.45); }
+
+/* Tables */
+.table {
+    color: var(--text-primary);
+    margin-bottom: 0;
+}
+
+.table td,
+.table th {
+    color: var(--text-primary);
+    border-color: var(--border-subtle);
+    background-color: transparent;
+}
+
+.table-light,
+.table-light > th,
+.table-light > td,
+.table thead.table-light th {
+    background-color: #1b241f !important;
+    color: #d8ffe4 !important;
+    border-color: #294034 !important;
+}
+
+.table-striped tbody tr:nth-of-type(odd) {
+    background-color: rgba(93, 242, 140, 0.04);
+}
+
+.table-striped tbody tr:nth-of-type(even) {
+    background-color: rgba(255, 255, 255, 0.01);
+}
 
 /* Heatmap table */
 .heatmap-table td { text-align: center; font-weight: 600; font-size: 0.85rem; }
 
 /* Clickable rows */
 .clickable-row { cursor: pointer; transition: background 0.15s; }
-.clickable-row:hover { background: #f0f3ff !important; }
+.clickable-row:hover { background: rgba(93, 242, 140, 0.08) !important; }
 
 /* Strategy list sidebar */
 .strategy-item { cursor: pointer; transition: background 0.2s; }
-.strategy-item:hover { background: #f0f0f0; }
-.strategy-item.active { background: #e7f1ff; border-left: 3px solid #667eea; }
+.strategy-item:hover { background: rgba(93, 242, 140, 0.07); }
+.strategy-item.active { background: rgba(93, 242, 140, 0.12); border-left: 3px solid var(--accent-green); }
 
 /* Loading spinner */
-.loading { text-align: center; padding: 40px; color: #6c757d; }
+.loading { text-align: center; padding: 40px; color: var(--text-secondary); }
+
+/* Containers with reserved height to prevent layout jitter */
+.chart-container {
+    min-height: 350px;
+}
+
+.table-container {
+    min-height: 300px;
+}
+
+.portfolio-sector-chart {
+    position: relative;
+    min-height: 260px;
+    height: 260px;
+}
+
+.portfolio-sector-chart canvas {
+    width: 100% !important;
+    height: 100% !important;
+}
+
+/* Stock checkup war room */
+.war-room-shell {
+    background: #0d1117;
+    border-color: #30363d;
+}
+
+.war-room-panel,
+.war-room-subpanel,
+.war-room-playbook-card {
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 12px;
+    color: #f0f6fc;
+}
+
+.war-room-shell .text-muted,
+.war-room-panel .text-muted,
+.war-room-subpanel .text-muted,
+.war-room-playbook-card .text-muted {
+    color: #9aa4af !important;
+}
+
+.war-room-news-item,
+.war-room-summary-block,
+.war-room-keyvalue-row strong,
+.war-room-playbook-card .fw-bold,
+.war-room-playbook-card strong {
+    color: #f0f6fc;
+}
+
+.war-room-topbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 1rem;
+    padding: 0.25rem 0 1rem;
+}
+
+.war-room-brand {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+}
+
+.war-room-logo-dot {
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+}
+
+.war-room-logo-dot-primary { background: #f85149; }
+.war-room-logo-dot-secondary { background: rgba(88, 166, 255, 0.85); margin-left: -0.5rem; }
+
+.war-room-actions {
+    min-width: min(100%, 360px);
+}
+
+.war-room-search-group .form-control,
+.war-room-search-group .btn {
+    border-radius: 10px;
+}
+
+.war-room-search-group .form-control {
+    background: #0d1117;
+    color: var(--text-primary);
+    border-color: #30363d;
+}
+
+.war-room-search-group .form-control::placeholder {
+    color: #8b949e;
+}
+
+.text-highlight {
+    color: #58a6ff;
+}
+
+.war-room-chart-toolbar {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+    margin-bottom: 1rem;
+}
+
+.war-room-period-group .btn {
+    border-color: #30363d;
+    color: #c9d1d9;
+}
+
+.war-room-period-group .btn.active,
+.war-room-period-group .btn:hover {
+    background: #58a6ff;
+    border-color: #58a6ff;
+    color: #0d1117;
+}
+
+.war-room-toggle-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+}
+
+.war-room-toggle-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+    padding: 0.35rem 0.65rem;
+    border: 1px solid #30363d;
+    border-radius: 999px;
+    background: #0d1117;
+    color: #8b949e;
+    font-size: 0.82rem;
+    cursor: pointer;
+}
+
+.war-room-toggle-pill input {
+    accent-color: #58a6ff;
+}
+
+.war-room-toggle-pill.is-active {
+    background: rgba(88, 166, 255, 0.12);
+    border-color: rgba(88, 166, 255, 0.7);
+    color: #f0f6fc;
+}
+
+.war-room-chart-placeholder {
+    min-height: 500px;
+    border: 1px solid rgba(88, 166, 255, 0.12);
+    border-radius: 12px;
+    background: #161b22;
+    display: block;
+    position: relative;
+    overflow: hidden;
+    padding: 0;
+}
+
+.war-room-chart-copy {
+    width: 100%;
+    height: 100%;
+    min-height: 500px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.55rem;
+    text-align: center;
+    padding: 1.5rem;
+}
+
+.war-room-chart-surface {
+    width: 100%;
+    height: 100%;
+    min-height: 500px;
+}
+
+.war-room-chart-stack {
+    display: grid;
+    gap: 0.75rem;
+    padding: 0.75rem;
+}
+
+.war-room-chart-pane {
+    --war-room-pane-height: 160px;
+    background: #0d1117;
+    border: 1px solid rgba(48, 54, 61, 0.85);
+    border-radius: 12px;
+    overflow: hidden;
+}
+
+.war-room-chart-pane.is-price {
+    --war-room-pane-height: 380px;
+}
+
+.war-room-chart-pane-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.55rem 0.8rem;
+    border-bottom: 1px solid rgba(48, 54, 61, 0.85);
+    background: rgba(13, 17, 23, 0.92);
+}
+
+.war-room-chart-pane-title {
+    font-size: 0.82rem;
+    font-weight: 700;
+    color: #f0f6fc;
+}
+
+.war-room-chart-pane-caption {
+    font-size: 0.75rem;
+    color: #8b949e;
+}
+
+.war-room-chart-pane-surface,
+.war-room-chart-pane-fallback {
+    width: 100%;
+    height: var(--war-room-pane-height);
+}
+
+.war-room-chart-pane-fallback {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 1rem;
+    color: #8b949e;
+    font-size: 0.85rem;
+}
+
+.war-room-chart-traces {
+    position: relative;
+    height: 180px;
+    margin-top: 1.5rem;
+}
+
+.war-room-trace {
+    position: absolute;
+    inset: auto 0 0 0;
+    height: 100%;
+    border-radius: 12px;
+    opacity: 0.85;
+}
+
+.war-room-trace-primary {
+    background: linear-gradient(135deg, transparent 0 10%, rgba(248, 81, 73, 0.9) 10% 12%, transparent 12% 20%, rgba(248, 81, 73, 0.9) 20% 22%, transparent 22% 32%, rgba(248, 81, 73, 0.9) 32% 34%, transparent 34% 46%, rgba(248, 81, 73, 0.9) 46% 48%, transparent 48% 60%, rgba(248, 81, 73, 0.9) 60% 62%, transparent 62% 72%, rgba(248, 81, 73, 0.9) 72% 74%, transparent 74% 100%);
+    clip-path: polygon(0 86%, 12% 74%, 24% 78%, 38% 48%, 52% 56%, 66% 28%, 80% 20%, 92% 28%, 100% 22%, 100% 100%, 0 100%);
+}
+
+.war-room-trace-secondary {
+    background: linear-gradient(135deg, transparent 0 10%, rgba(88, 166, 255, 0.7) 10% 11%, transparent 11% 20%, rgba(88, 166, 255, 0.7) 20% 21%, transparent 21% 34%, rgba(88, 166, 255, 0.7) 34% 35%, transparent 35% 48%, rgba(88, 166, 255, 0.7) 48% 49%, transparent 49% 64%, rgba(88, 166, 255, 0.7) 64% 65%, transparent 65% 78%, rgba(88, 166, 255, 0.7) 78% 79%, transparent 79% 100%);
+    clip-path: polygon(0 90%, 12% 81%, 24% 84%, 38% 60%, 52% 66%, 66% 40%, 80% 32%, 92% 40%, 100% 36%, 100% 100%, 0 100%);
+}
+
+.war-room-volume-bars {
+    display: flex;
+    align-items: flex-end;
+    gap: 1rem;
+    height: 80px;
+    padding-top: 1.5rem;
+}
+
+.war-room-volume-bars span {
+    width: 16px;
+    height: 36px;
+    border-radius: 6px 6px 0 0;
+}
+
+.war-room-volume-bars span.up { background: #f85149; }
+.war-room-volume-bars span.down { background: #2ea043; }
+.war-room-volume-bars span.tall { height: 62px; }
+.war-room-volume-bars span.mid { height: 48px; }
+.war-room-volume-bars span.short { height: 24px; }
+
+.war-room-subpanel {
+    padding: 1rem;
+}
+
+.war-room-subtitle,
+.war-room-summary-title {
+    font-size: 0.9rem;
+    font-weight: 700;
+    margin-bottom: 0.75rem;
+}
+
+.war-room-keyvalue-list {
+    display: grid;
+    gap: 0.55rem;
+}
+
+.war-room-keyvalue-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 1rem;
+    padding-bottom: 0.45rem;
+    border-bottom: 1px solid rgba(48, 54, 61, 0.6);
+    font-size: 0.92rem;
+}
+
+.war-room-keyvalue-row:last-child {
+    border-bottom: none;
+    padding-bottom: 0;
+}
+
+.war-room-confidence {
+    font-size: 2.1rem;
+    line-height: 1;
+    font-weight: 800;
+    color: #f85149;
+}
+
+.war-room-indicator-list,
+.war-room-bullet-list,
+.war-room-news-list,
+.war-room-summary-sections {
+    display: grid;
+    gap: 0.75rem;
+}
+
+.war-room-indicator-item,
+.war-room-bullet-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.7rem;
+    font-size: 0.92rem;
+}
+
+.war-room-indicator-dot,
+.war-room-bullet-item .dot {
+    display: inline-block;
+    width: 10px;
+    min-width: 10px;
+    height: 10px;
+    margin-top: 0.35rem;
+    border-radius: 50%;
+}
+
+.war-room-indicator-dot.positive,
+.war-room-tone-positive .war-room-playbook-topline,
+.war-room-bullet-item .dot {
+    background: #f85149;
+}
+
+.war-room-indicator-dot.negative,
+.war-room-tone-negative .war-room-playbook-topline {
+    background: #2ea043;
+}
+
+.war-room-indicator-dot.neutral,
+.war-room-tone-neutral .war-room-playbook-topline {
+    background: #d29922;
+}
+
+.war-room-summary-block {
+    padding: 0.85rem 1rem;
+    border-radius: 12px;
+    border: 1px solid rgba(48, 54, 61, 0.7);
+    background: rgba(13, 17, 23, 0.7);
+}
+
+.war-room-summary-block.positive .war-room-summary-title { color: #f85149; }
+.war-room-summary-block.highlight .war-room-summary-title { color: #58a6ff; }
+.war-room-summary-block.neutral .war-room-summary-title { color: #d29922; }
+
+.war-room-divider {
+    height: 1px;
+    background: rgba(48, 54, 61, 0.9);
+    margin: 1rem 0;
+}
+
+.war-room-news-item {
+    padding-bottom: 0.85rem;
+    border-bottom: 1px solid rgba(48, 54, 61, 0.6);
+}
+
+.war-room-news-item:last-child {
+    padding-bottom: 0;
+    border-bottom: none;
+}
+
+.war-room-playbook-card {
+    position: relative;
+}
+
+.war-room-playbook-topline {
+    height: 6px;
+    width: 100%;
+}
 
 /* Responsive tweaks */
 @media (max-width: 768px) {
     .stat-value { font-size: 1.25rem; }
     .nav-tabs .nav-link { padding: 0.5rem 0.75rem; font-size: 0.85rem; }
     .table { font-size: 0.8rem; }
+    .chart-container { min-height: 280px; }
+    .table-container { min-height: 240px; }
+    .war-room-topbar {
+        flex-direction: column;
+        align-items: stretch;
+    }
+    .war-room-actions {
+        min-width: 100%;
+    }
+    .war-room-chart-toolbar {
+        flex-direction: column;
+        align-items: stretch;
+    }
+    .war-room-toggle-grid {
+        gap: 0.4rem;
+    }
+    .war-room-toggle-pill {
+        width: fit-content;
+    }
+    .war-room-chart-placeholder {
+        min-height: 340px;
+    }
+    .war-room-chart-copy,
+    .war-room-chart-surface {
+        min-height: 340px;
+    }
+    .war-room-chart-stack {
+        padding: 0.5rem;
+        gap: 0.5rem;
+    }
+    .war-room-chart-pane.is-price {
+        --war-room-pane-height: 300px;
+    }
+    .war-room-chart-pane {
+        --war-room-pane-height: 140px;
+    }
+    .war-room-confidence {
+        font-size: 1.6rem;
+    }
 }

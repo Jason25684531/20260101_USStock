@@ -20,6 +20,7 @@ import os
 from datetime import datetime
 from typing import Dict
 import pytz
+import traceback
 
 # APScheduler
 from apscheduler.schedulers.blocking import BlockingScheduler
@@ -31,6 +32,7 @@ from adapters.notifier import send_signal, get_notifier
 from adapters.broker import AlpacaBroker, MockBroker
 from strategies import run_momentum_strategy, run_value_strategy
 from config import DEFAULT_SYMBOLS
+from screener.market_data_resilience import should_alert_degraded_data
 
 
 # 向後相容：傳統模式只用 4 支, screener 模式用全部
@@ -46,7 +48,26 @@ TRADING_MODE = os.getenv('TRADING_MODE', 'backtest').lower()
 STRATEGY_TYPE = os.getenv('STRATEGY_TYPE', 'traditional').lower()
 
 
-def execute_trades(broker, target_positions: Dict[str, int], db: DatabaseAdapter):
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in ('1', 'true', 'yes', 'on')
+
+
+def _optional_env_flag(name: str):
+    value = os.getenv(name)
+    if value is None:
+        return None
+    return value.strip().lower() in ('1', 'true', 'yes', 'on')
+
+
+def execute_trades(
+    broker,
+    target_positions: Dict[str, int],
+    db: DatabaseAdapter,
+    strategy_label: str = 'Paper Trading',
+):
     """
     執行交易 - 計算目標倉位與實際倉位的差異並執行訂單
     
@@ -108,7 +129,7 @@ def execute_trades(broker, target_positions: Dict[str, int], db: DatabaseAdapter
                 action=side.upper(),
                 price=broker.get_current_price(symbol),
                 reason=f"策略調倉: {current_qty} -> {target_qty}",
-                strategy="Paper Trading"
+                strategy=strategy_label
             )
             
         except Exception as e:
@@ -143,6 +164,8 @@ def job():
     notifier = get_notifier()
     signals_generated = []
     broker = None
+    db = None
+    screener = None
     
     # 初始化 Broker
     if TRADING_MODE == 'paper':
@@ -179,19 +202,23 @@ def job():
         # Note: TRADING_MODE 是全局常量，此處不修改
     
     try:
-        # 步驟 1: 下載並保存市場數據
-        print("【步驟 1/3】 下載市場數據")
-        download_results = download_and_save(
-            symbols=SYMBOLS,
-            period='2y',
-            interval='1d'
-        )
-        
-        if not download_results['success']:
-            error_msg = "沒有成功下載任何數據"
-            print(f"❌ {error_msg}")
-            notifier.send_error_alert("數據下載失敗", error_msg)
-            return
+        download_results = {'success': [], 'failed': []}
+        if STRATEGY_TYPE == 'screener':
+            print("【步驟 1/4】 跳過通用市場數據下載，直接走 DailyScreener 官方排程路徑")
+        else:
+            # 步驟 1: 下載並保存市場數據
+            print("【步驟 1/3】 下載市場數據")
+            download_results = download_and_save(
+                symbols=SYMBOLS,
+                period='2y',
+                interval='1d'
+            )
+            
+            if not download_results['success']:
+                error_msg = "沒有成功下載任何數據"
+                print(f"❌ {error_msg}")
+                notifier.send_error_alert("數據下載失敗", error_msg)
+                return
         
         # 步驟 2: 執行策略
         db = DatabaseAdapter()
@@ -205,34 +232,41 @@ def job():
 
             try:
                 screener = DailyScreener(
-                    symbols=DEFAULT_SYMBOLS,
-                    use_ml=False,
+                    symbols=None,
+                    use_ml=_optional_env_flag('USE_ML'),
                     top_n=int(os.getenv('SCREENER_TOP_N', '5')),
                 )
                 df_scan = screener.scan_all()
                 recommendations = screener.get_top_recommendations(df_scan)
 
                 # 存入 DB
-                screener.save_to_db(recommendations)
+                wrote_recommendations = screener.save_to_db(recommendations)
+                run_summary = getattr(screener, 'last_run_summary', {}) or {}
 
                 # 發送 Flex Message 推薦報告
-                if notifier.is_enabled:
+                if notifier.is_enabled and wrote_recommendations:
                     notifier.send_flex_report(recommendations)
+                elif notifier.is_enabled and should_alert_degraded_data(run_summary):
+                    notifier.send_error_alert(
+                        "Screener data degraded",
+                        run_summary.get('provider_health_summary')
+                        or run_summary.get('write_blocked_reason')
+                        or 'provider degradation detected',
+                    )
 
-                for rec in recommendations:
-                    signals_generated.append({
-                        'symbol': rec['symbol'],
-                        'action': rec['signal'],
-                        'price': rec['current_price'],
-                        'strategy': 'Screener',
-                        'confidence': rec['total_score'] / 5.0,
-                    })
+                if wrote_recommendations:
+                    for rec in recommendations:
+                        signals_generated.append({
+                            'symbol': rec['symbol'],
+                            'action': rec['signal'],
+                            'price': rec['current_price'],
+                            'strategy': 'Screener',
+                            'confidence': rec['total_score'] / 5.0,
+                        })
 
-                screener.close()
 
             except Exception as e:
                 print(f"❌ 選股推薦執行失敗: {str(e)}")
-                import traceback
                 traceback.print_exc()
 
         elif STRATEGY_TYPE == 'ml':
@@ -319,7 +353,6 @@ def job():
                 
             except Exception as e:
                 print(f"❌ ML 策略執行失敗: {str(e)}")
-                import traceback
                 traceback.print_exc()
         
         else:
@@ -398,14 +431,14 @@ def job():
         
         # 步驟 4: 執行交易 (僅在 paper/simulation 模式)
         executed_trades = []
-        if TRADING_MODE == 'paper' and broker:
+        if TRADING_MODE in ('paper', 'simulation') and broker:
             print(f"\n【步驟 4/4】 執行實際交易")
-            executed_trades = execute_trades(broker, target_positions, db)
+            strategy_label = 'Simulation Trading' if TRADING_MODE == 'simulation' else 'Paper Trading'
+            executed_trades = execute_trades(broker, target_positions, db, strategy_label=strategy_label)
             print(f"✅ 已執行 {len(executed_trades)} 筆交易")
         else:
             print(f"\n【步驟 4/4】 跳過交易執行 (回測模式)")
         
-        db.close()
         
         # 發送交易信號通知 (僅在回測模式)
         if TRADING_MODE == 'backtest':
@@ -420,11 +453,14 @@ def job():
         
         # 發送每日摘要
         if notifier.is_enabled:
+            top_performers = list(download_results['success'][:3]) or [
+                signal['symbol'] for signal in signals_generated[:3]
+            ]
             notifier.send_daily_summary(
-                total_trades=len(executed_trades) if TRADING_MODE == 'paper' else len(signals_generated),
+                total_trades=len(executed_trades) if TRADING_MODE in ('paper', 'simulation') else len(signals_generated),
                 pnl=0.0,  # 需要實際計算
                 win_rate=0.0,
-                top_performers=list(download_results['success'][:3])
+                top_performers=top_performers
             )
         
         # 打印最終摘要
@@ -452,7 +488,21 @@ def job():
         error_msg = f"策略執行異常: {str(e)}"
         print(f"❌ {error_msg}")
         notifier.send_error_alert("系統異常", error_msg)
+        traceback.print_exc()
+        if _env_flag('USE_SCHEDULER', default=False):
+            return
         raise
+    finally:
+        if screener is not None:
+            try:
+                screener.close()
+            except Exception as close_error:
+                print(f"??  DailyScreener close 憭望?: {close_error}")
+        if db is not None:
+            try:
+                db.close()
+            except Exception as close_error:
+                print(f"??  DatabaseAdapter close 憭望?: {close_error}")
 
 
 def run_scheduler():
@@ -464,10 +514,12 @@ def run_scheduler():
     print("\n" + "="*60)
     print("🕐 啟動定時調度器")
     print("="*60)
-    print(f"調度時間: 每個交易日 16:15 EST (美東時間)")
+    scheduler_hour = int(os.getenv('SCHEDULER_HOUR', '16'))
+    scheduler_minute = int(os.getenv('SCHEDULER_MINUTE', '15'))
+    print(f"調度時間: 每個交易日 {scheduler_hour:02d}:{scheduler_minute:02d} EST (美東時間)")
     print(f"當前時間: {datetime.now(US_EASTERN).strftime('%Y-%m-%d %H:%M:%S %Z')}")
     print("="*60 + "\n")
-    
+
     scheduler = BlockingScheduler(timezone=US_EASTERN)
     
     # 每個交易日（週一到週五）16:15 執行
@@ -475,8 +527,8 @@ def run_scheduler():
         job,
         CronTrigger(
             day_of_week='mon-fri',
-            hour=16,
-            minute=15,
+            hour=scheduler_hour,
+            minute=scheduler_minute,
             timezone=US_EASTERN
         ),
         id='daily_strategy_job',

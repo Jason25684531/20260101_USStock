@@ -6,6 +6,11 @@
 
 # strategies/src/config.py
 import os
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
 # ==========================================
 # 基礎設施連線配置 (Infrastructure)
@@ -14,12 +19,36 @@ import os
 OPENBB_API_URL = os.getenv("OPENBB_API_URL", "http://127.0.0.1:6900")
 
 # 指向你的 MySQL 資料庫中樞
-DB_URI = os.getenv("DATABASE_URL", "mysql+pymysql://root:root@127.0.0.1:3308/quant_db")
+DB_URI = os.getenv(
+    "DATABASE_URL",
+    "mysql+mysqlconnector://{user}:{password}@{host}:{port}/{database}".format(
+        user=os.getenv("DB_USER", os.getenv("MYSQL_USER", "trader")),
+        password=os.getenv("DB_PASSWORD", ""),
+        host=os.getenv("DB_HOST", "127.0.0.1"),
+        port=os.getenv("DB_PORT", "3308"),
+        database=os.getenv("DB_NAME", os.getenv("MYSQL_DATABASE", "usstock")),
+    ),
+)
 
 # ==========================================
 # 策略配置 (Strategy)
 # ==========================================
-UNIVERSE_TICKERS = ["NVDA", "TSLA", "AAPL", "MSFT", "AMD"] # 測試標的池
+UNIVERSE_TICKERS = [
+    "NVDA", "TSLA", "AAPL", "MSFT", "AMD", "META", "AMZN", "GOOGL", "NFLX", "BRK-B",
+    "JPM", "V", "MA", "JNJ", "PG", "HD", "CVX", "MRK", "ABBV", "COST",
+    "PEP", "WMT", "KO", "DIS", "MCD", "CSCO", "INTC", "CRM", "NKE", "BA",
+    "BAC", "XOM", "WFC", "ORCL", "IBM", "QCOM", "TXN", "CAT", "UNH", "LLY",
+    "ABT", "ACN", "ADBE", "AMGN", "AVGO", "CMCSA", "COP", "DHR", "GE", "GILD",
+    "GS", "HON", "INTU", "ISRG", "LIN", "LOW", "MDT", "MMM", "MO", "MS",
+    "NOW", "PANW", "PFE", "PLTR", "PM", "RTX", "SBUX", "SCHW", "SPGI", "T",
+    "TMO", "TMUS", "UNP", "UPS", "USB", "VZ", "BLK", "C", "DE", "ELV",
+    "ADP", "BKNG", "SYK", "TJX", "CHTR", "MDLZ", "AMAT", "MU", "LRCX", "KLAC",
+    "SNPS", "CDNS", "PYPL", "SHOP", "UBER", "APH", "CRWD", "ARM", "MRVL", "ANET",
+]  # 100 檔高流動性美股壓測股票池
+NEWS_PROVIDER = os.getenv("NEWS_PROVIDER", "yfinance")
+NEWS_LIMIT = int(os.getenv("NEWS_LIMIT", "5"))
+NEWS_LOOKBACK_DAYS = int(os.getenv("NEWS_LOOKBACK_DAYS", "3"))
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 
 # ============================================================

@@ -18,13 +18,18 @@ from sklearn.model_selection import train_test_split
 import warnings
 warnings.filterwarnings('ignore')
 
+try:
+    from utils.runtime_config import get_model_load_candidates, resolve_model_path
+except ImportError:
+    from strategies.src.utils.runtime_config import get_model_load_candidates, resolve_model_path
+
 # 嘗試導入 XGBoost
 try:
     from xgboost import XGBClassifier
     XGBOOST_AVAILABLE = True
 except ImportError:
     XGBOOST_AVAILABLE = False
-    print("⚠️  XGBoost 未安裝，將使用 RandomForest")
+    print("[WARN] XGBoost 未安裝，將使用 RandomForest")
 
 # 嘗試導入 matplotlib
 try:
@@ -34,7 +39,7 @@ try:
     MATPLOTLIB_AVAILABLE = True
 except ImportError:
     MATPLOTLIB_AVAILABLE = False
-    print("⚠️  matplotlib 未安裝，將無法生成圖表")
+    print("[WARN] matplotlib 未安裝，將無法生成圖表")
 
 
 class StrategyModel:
@@ -75,7 +80,7 @@ class StrategyModel:
         
         # 如果選擇 XGBoost 但未安裝，自動回退到 RandomForest
         if model_type == 'xgboost' and not XGBOOST_AVAILABLE:
-            print("⚠️  XGBoost 不可用，回退到 RandomForest")
+            print("[WARN] XGBoost 不可用，回退到 RandomForest")
             model_type = 'randomforest'
             self.model_type = 'randomforest'
         
@@ -94,7 +99,7 @@ class StrategyModel:
                 use_label_encoder=False,
                 **kwargs
             )
-            print(f"✅ 使用 XGBoost 模型 (n_estimators={n_estimators}, max_depth={max_depth}, "
+            print(f"[OK] 使用 XGBoost 模型 (n_estimators={n_estimators}, max_depth={max_depth}, "
                   f"lr={learning_rate}, lambda={reg_lambda}, gamma={gamma})")
         else:
             # 使用 RandomForest
@@ -108,7 +113,7 @@ class StrategyModel:
                 class_weight='balanced',
                 **kwargs
             )
-            print(f"✅ 使用 RandomForest 模型 (n_estimators={n_estimators}, max_depth={max_depth})")
+            print(f"[OK] 使用 RandomForest 模型 (n_estimators={n_estimators}, max_depth={max_depth})")
         
         self.feature_names = None
         self.feature_importance = None
@@ -170,13 +175,13 @@ class StrategyModel:
             )
             # 記錄實際使用的迭代次數
             best_iteration = getattr(self.model, 'best_iteration', self.model.n_estimators)
-            print(f"   ✅ 最佳迭代次數: {best_iteration}")
+            print(f"   [OK] 最佳迭代次數: {best_iteration}")
         else:
             self.model.fit(X_train, y_train)
         
         training_time = (datetime.now() - start_time).total_seconds()
         
-        print(f"   ✅ 訓練完成 (耗時: {training_time:.2f}秒)")
+        print(f"   [OK] 訓練完成 (耗時: {training_time:.2f}秒)")
         
         # 獲取特徵重要性
         self.feature_importance = pd.DataFrame({
@@ -307,12 +312,11 @@ class StrategyModel:
         
         if filepath is None:
             # 默認保存到 data/ 目錄
-            project_root = Path(__file__).parent.parent.parent.parent
-            data_dir = project_root / 'data'
-            data_dir.mkdir(exist_ok=True)
-            filepath = data_dir / 'model.pkl'
+            filepath = resolve_model_path()
         
-        filepath = Path(filepath)
+        load_candidates = get_model_load_candidates(explicit_path=filepath)
+        filepath = next((candidate for candidate in load_candidates if candidate.exists()), None)
+        filepath.parent.mkdir(parents=True, exist_ok=True)
         
         # 保存模型和元數據
         model_data = {
@@ -327,7 +331,7 @@ class StrategyModel:
         with open(filepath, 'wb') as f:
             pickle.dump(model_data, f)
         
-        print(f"\n✅ 模型已保存到: {filepath}")
+        print(f"\n[OK] 模型已保存到: {filepath}")
     
     @classmethod
     def load(cls, filepath: str = None) -> 'StrategyModel':
@@ -342,15 +346,14 @@ class StrategyModel:
         """
         if filepath is None:
             # 默認從 data/ 目錄加載，優先 model.pkl，fallback test_model.pkl
-            project_root = Path(__file__).parent.parent.parent.parent
-            filepath = project_root / 'data' / 'model.pkl'
-            if not filepath.exists():
-                filepath = project_root / 'data' / 'test_model.pkl'
+            filepath = None
         
-        filepath = Path(filepath)
+        load_candidates = get_model_load_candidates(explicit_path=filepath)
+        filepath = next((candidate for candidate in load_candidates if candidate.exists()), None)
         
-        if not filepath.exists():
-            raise FileNotFoundError(f"模型文件不存在: {filepath} (也檢查了 test_model.pkl)")
+        if filepath is None:
+            searched_paths = ", ".join(str(candidate) for candidate in load_candidates)
+            raise FileNotFoundError(f"模型文件不存在，已檢查路徑: {searched_paths}")
         
         with open(filepath, 'rb') as f:
             model_data = pickle.load(f)
@@ -365,7 +368,7 @@ class StrategyModel:
         instance.is_trained = True
         
         trained_at = model_data.get('trained_at', 'unknown')
-        print(f"✅ 模型已加載: {filepath}")
+        print(f"[OK] 模型已加載: {filepath}")
         print(f"   訓練時間: {trained_at}")
         print(f"   特徵數量: {len(instance.feature_names)}")
         
@@ -398,7 +401,7 @@ class StrategyModel:
             保存的文件路徑
         """
         if not MATPLOTLIB_AVAILABLE:
-            print("⚠️  matplotlib 未安裝，無法生成特徵重要性圖表")
+            print("[WARN] matplotlib 未安裝，無法生成特徵重要性圖表")
             return ""
         
         if self.feature_importance is None:
@@ -465,7 +468,7 @@ class StrategyModel:
             保存的文件路徑（空字串如果 matplotlib 不可用）
         """
         if not MATPLOTLIB_AVAILABLE:
-            print("⚠️  matplotlib 未安裝，無法生成預測準確度圖表")
+            print("[WARN] matplotlib 未安裝，無法生成預測準確度圖表")
             return ""
         
         if not self.is_trained:

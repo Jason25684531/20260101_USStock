@@ -7,44 +7,12 @@ Provides schema introspection helpers shared by app.py and bot/handler.py.
 
 from __future__ import annotations
 
-import os
 from typing import Dict, Optional
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
-from security import get_secret
-
-
-def get_db_config() -> Dict[str, str]:
-    """Return DB connection config from env/secrets with defaults."""
-    db_host = os.getenv("DB_HOST", "localhost")
-    db_port = os.getenv("DB_PORT", "3306")
-    db_user = os.getenv("DB_USER", "root")
-    db_pass = get_secret("db_root_password", default=os.getenv("DB_PASSWORD", "rootpassword"))
-    db_name = os.getenv("DB_NAME", "usstock")
-
-    return {
-        "host": db_host,
-        "port": db_port,
-        "user": db_user,
-        "password": db_pass or "",
-        "name": db_name,
-    }
-
-
-def build_connection_string(config: Dict[str, str]) -> str:
-    """Build a SQLAlchemy MySQL connection string from config."""
-    return (
-        f"mysql+mysqlconnector://{config['user']}:{config['password']}@"
-        f"{config['host']}:{config['port']}/{config['name']}?charset=utf8mb4"
-    )
-
-
-def get_engine(config: Optional[Dict[str, str]] = None, echo: bool = False) -> Engine:
-    """Create a SQLAlchemy engine using env/secrets config."""
-    cfg = config or get_db_config()
-    return create_engine(build_connection_string(cfg), echo=echo)
+from utils.db import build_connection_string, get_db_config, get_engine
 
 
 # ============================================
@@ -73,3 +41,24 @@ def column_exists(conn, table_name: str, column_name: str) -> bool:
         LIMIT 1
     """), {'table_name': table_name, 'column_name': column_name}).first()
     return row is not None
+
+
+def resolve_existing_column(conn, table_name: str, column_candidates) -> Optional[str]:
+    """Return the first candidate column that exists for a table."""
+    for column_name in column_candidates:
+        if column_exists(conn, table_name, column_name):
+            return column_name
+    return None
+
+
+def optional_column_expr(conn, table_name: str, column_candidates, alias: str, default_sql: str = "NULL") -> str:
+    """Return a SQL select expression for the first existing candidate column."""
+    column_name = resolve_existing_column(conn, table_name, column_candidates)
+    if column_name:
+        return f"{column_name} AS {alias}"
+    return f"{default_sql} AS {alias}"
+
+
+def select_optional_column(conn, table_name: str, column_candidates, alias: str, default_sql: str = "NULL") -> str:
+    """Compatibility alias for optional select-column expressions."""
+    return optional_column_expr(conn, table_name, column_candidates, alias, default_sql=default_sql)

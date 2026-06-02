@@ -16,6 +16,7 @@ from .momentum import (
 )
 from .value import run_value_strategy, run_multi_symbol_value
 from .fundamental import (
+    calculate_valuation_targets,
     screen_peg,
     screen_dupont,
     PEGStrategy,
@@ -44,7 +45,10 @@ from .sector import (
 )
 from .macro_filter import (
     MacroRegime,
+    BULL_MARKET,
+    BEAR_MARKET,
     classify_macro_regime,
+    get_market_regime,
     get_regime_strategy_filter,
 )
 
@@ -55,11 +59,11 @@ __all__ = [
     # Legacy
     'run_momentum_strategy', 'run_multi_symbol_momentum',
     'run_value_strategy', 'run_multi_symbol_value',
-    'screen_breakout', 'screen_acceleration', 'screen_peg', 'screen_dupont',
+    'screen_breakout', 'screen_acceleration', 'calculate_valuation_targets', 'screen_peg', 'screen_dupont',
     # New strategies
     'screen_institutional', 'screen_volume_structure', 'screen_money_flow',
     'screen_multi_tf_momentum', 'screen_relative_strength',
     'screen_earnings_quality', 'screen_sector_rotation',
     'apply_sector_constraint', 'get_sector', 'SECTOR_MAP',
-    'MacroRegime', 'classify_macro_regime', 'get_regime_strategy_filter',
+    'MacroRegime', 'BULL_MARKET', 'BEAR_MARKET', 'classify_macro_regime', 'get_market_regime', 'get_regime_strategy_filter',
 ]

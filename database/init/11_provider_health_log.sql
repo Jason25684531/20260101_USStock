@@ -1,0 +1,35 @@
+USE usstock;
+
+CREATE TABLE IF NOT EXISTS provider_health_log (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    run_key VARCHAR(64) NOT NULL,
+    run_at DATETIME NOT NULL,
+    total_symbols INT NOT NULL DEFAULT 0,
+    live_successes INT NOT NULL DEFAULT 0,
+    fallback_successes INT NOT NULL DEFAULT 0,
+    failed_symbols INT NOT NULL DEFAULT 0,
+    skipped_symbols INT NOT NULL DEFAULT 0,
+    coverage_ratio DECIMAL(8, 4) NOT NULL DEFAULT 0,
+    minimum_coverage_ratio DECIMAL(8, 4) NOT NULL DEFAULT 0,
+    current_data_mode VARCHAR(16) NOT NULL DEFAULT 'unknown',
+    stale_data_used TINYINT(1) NOT NULL DEFAULT 0,
+    recommendations_written TINYINT(1) NOT NULL DEFAULT 0,
+    write_blocked_reason TEXT NULL,
+    provider_counts JSON NULL,
+    effective_provider VARCHAR(64) NULL,
+    stale_age_days INT NULL,
+    last_successful_provider VARCHAR(64) NULL,
+    provider_attempts JSON NULL,
+    fallback_attempts JSON NULL,
+    skip_reasons JSON NULL,
+    top_error_types JSON NULL,
+    error_summary TEXT NULL,
+    last_successful_run_at DATETIME NULL,
+    last_valid_recommendation_time DATETIME NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+
+    UNIQUE KEY uk_provider_health_run_key (run_key),
+    INDEX idx_provider_health_run_at (run_at),
+    INDEX idx_provider_health_mode (current_data_mode)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

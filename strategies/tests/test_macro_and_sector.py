@@ -2,7 +2,9 @@
 Tests for macro regime classification and sector constraints.
 """
 
-from strategies.macro_filter import MacroRegime, classify_macro_regime, get_regime_strategy_filter
+import pandas as pd
+
+from strategies.macro_filter import BEAR_MARKET, BULL_MARKET, MacroRegime, classify_macro_regime, get_market_regime, get_regime_strategy_filter
 from strategies.sector import apply_sector_constraint, get_sector
 
 
@@ -33,6 +35,14 @@ def test_get_regime_strategy_filter_keys():
         "description",
     }
     assert info["max_positions"] == 3
+
+
+def test_get_market_regime_uses_spy_200sma_filter():
+    bear_df = pd.DataFrame({"close": [100.0] * 199 + [90.0]})
+    bull_df = pd.DataFrame({"close": [100.0] * 199 + [110.0]})
+
+    assert get_market_regime(bear_df) == BEAR_MARKET
+    assert get_market_regime(bull_df) == BULL_MARKET
 
 
 def test_apply_sector_constraint_limits_per_sector():

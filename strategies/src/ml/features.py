@@ -9,6 +9,117 @@ from typing import Optional
 from config import calc_rsi
 
 
+RAW_INSTITUTIONAL_SENTIMENT_COLUMNS = {
+    'whale_held_pct',
+    'inst_count',
+    'institutional_net_buy',
+    'sentiment_score',
+}
+INSTITUTIONAL_SENTIMENT_FEATURE_COLUMNS = {
+    'whale_concentration',
+    'inst_trust_score',
+    'institutional_net_buy_score',
+    'inst_net_intensity',
+    'news_sentiment',
+}
+
+
+def _coerce_finite_float(value, default: float = 0.0) -> float:
+    try:
+        if value is None or pd.isna(value):
+            return default
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return default
+    if not np.isfinite(numeric):
+        return default
+    return numeric
+
+
+def _normalize_percentage_feature(value) -> float:
+    numeric = _coerce_finite_float(value)
+    if numeric <= 0:
+        return 0.0
+    if numeric > 1:
+        numeric /= 100.0
+    return round(float(np.clip(numeric, 0.0, 1.0)), 6)
+
+
+def _normalize_count_feature(value, cap: float = 2000.0) -> float:
+    numeric = max(0.0, _coerce_finite_float(value))
+    if numeric == 0:
+        return 0.0
+    scaled = np.log1p(numeric) / np.log1p(cap)
+    return round(float(np.clip(scaled, 0.0, 1.0)), 6)
+
+
+def _normalize_signed_score(value) -> float:
+    numeric = _coerce_finite_float(value)
+    if abs(numeric) > 1:
+        numeric /= 100.0
+    return round(float(np.clip(numeric, -1.0, 1.0)), 6)
+
+
+def extract_institutional_and_sentiment_features(source) -> dict:
+    """
+    Normalize latest registry enrichment values into model-ready features.
+
+    The helper accepts dict-like rows, pandas Series, or empty input and returns
+    neutral defaults for missing data.
+    """
+    if source is None:
+        source = {}
+
+    institutional_net_buy_score = _normalize_signed_score(
+        source.get('institutional_net_buy', 0.0)
+        if hasattr(source, 'get')
+        else 0.0
+    )
+
+    return {
+        'whale_concentration': _normalize_percentage_feature(
+            source.get('whale_held_pct', 0.0)
+            if hasattr(source, 'get')
+            else 0.0
+        ),
+        'inst_trust_score': _normalize_count_feature(
+            source.get('inst_count', 0.0)
+            if hasattr(source, 'get')
+            else 0.0
+        ),
+        'institutional_net_buy_score': institutional_net_buy_score,
+        'inst_net_intensity': institutional_net_buy_score,
+        'news_sentiment': round(float(np.clip(
+            _coerce_finite_float(
+                source.get('sentiment_score', 0.0)
+                if hasattr(source, 'get')
+                else 0.0
+            ),
+            -1.0,
+            1.0,
+        )), 6),
+    }
+
+
+def add_institutional_and_sentiment_feature_columns(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+
+    enriched = df.copy()
+    if not RAW_INSTITUTIONAL_SENTIMENT_COLUMNS.intersection(enriched.columns):
+        for column in INSTITUTIONAL_SENTIMENT_FEATURE_COLUMNS:
+            enriched[column] = 0.0
+        return enriched
+
+    normalized = enriched.apply(
+        lambda row: pd.Series(extract_institutional_and_sentiment_features(row)),
+        axis=1,
+    )
+    for column in normalized.columns:
+        enriched[column] = normalized[column].astype(float)
+    return enriched
+
+
 def calculate_macd(
     prices: pd.Series, 
     fast_period: int = 12,
@@ -438,6 +549,10 @@ def make_features(
             if col in df.columns:
                 df[f'{col}_Change'] = df[col].pct_change(periods=10) * 100
                 df[f'{col}_Change'] = df[f'{col}_Change'].fillna(0)
+
+    # ===== 4.5 Institutional and sentiment registry features =====
+
+    df = add_institutional_and_sentiment_feature_columns(df)
     
     # ===== 5. 創建目標標籤 =====
     
@@ -464,9 +579,13 @@ def make_features(
     df = df.dropna(subset=critical_features)
     
     # 對於其餘的 NaN，用 0 填充（表示"無數據"而非"缺失錯誤"）
-    feature_cols = [col for col in df.columns 
-                   if col not in ['Target', 'Future_Return', 'Open', 'High', 'Low', 'Close', 'Volume',
-                                  'open', 'high', 'low', 'close', 'volume', 'symbol']]
+    feature_cols = [
+        col for col in df.columns
+        if col not in [
+            'Target', 'Future_Return', 'Open', 'High', 'Low', 'Close', 'Volume',
+            'open', 'high', 'low', 'close', 'volume', 'symbol',
+        ]
+    ]
     
     for col in feature_cols:
         if df[col].isna().any():

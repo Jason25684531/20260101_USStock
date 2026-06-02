@@ -8,6 +8,7 @@ openspec/
 doc/
 .github/
 .claude/
+.agents/
 
 # Python
 venv/
