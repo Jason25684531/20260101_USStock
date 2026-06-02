@@ -30,7 +30,26 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError, OperationalError
 
 from security import get_secret
-from db import get_engine, table_exists as _table_exists, column_exists as _column_exists
+from db import (
+    get_engine,
+    table_exists as _table_exists,
+    column_exists as _column_exists,
+    select_optional_column as _shared_select_optional_column,
+)
+from repositories.institutional_flow import (
+    INSTITUTIONAL_FLOW_TABLE_CANDIDATES as SHARED_INSTITUTIONAL_FLOW_TABLE_CANDIDATES,
+    load_actual_institutional_flow_snapshot as _shared_load_actual_institutional_flow_snapshot,
+    resolve_existing_column as _shared_resolve_existing_column,
+)
+from serializers.presentation import (
+    derive_flow_value as _shared_derive_flow_value,
+    format_compact_number as _shared_format_compact_number,
+    format_money_compact as _shared_format_money_compact,
+    format_signed_number as _shared_format_signed_number,
+    format_trade_date as _shared_format_trade_date,
+    json_loads_safe as _shared_json_loads_safe,
+    to_float as _shared_to_float,
+)
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _STRATEGIES_SRC = _PROJECT_ROOT / 'strategies' / 'src'
@@ -144,14 +163,7 @@ def _is_database_unavailable_error(error: Exception) -> bool:
 
 
 def _json_loads_safe(value, default=None):
-    if value in (None, ''):
-        return default
-    if isinstance(value, (dict, list)):
-        return value
-    try:
-        return json.loads(value)
-    except Exception:
-        return default
+    return _shared_json_loads_safe(value, default)
 
 
 def _empty_provider_health():
@@ -501,7 +513,7 @@ _VALUATION_POLICY = GrowthAwarePolicy()
 
 
 def _safe_float(value):
-    return _shared_safe_float(value)
+    return _shared_to_float(value)
 
 
 def _format_price(value):
@@ -726,7 +738,8 @@ def _build_stock_analysis_message(payload: dict) -> str:
     return "\n".join(lines)
 
 
-INSTITUTIONAL_FLOW_TABLE_CANDIDATES = (
+INSTITUTIONAL_FLOW_TABLE_CANDIDATES = SHARED_INSTITUTIONAL_FLOW_TABLE_CANDIDATES
+LEGACY_INSTITUTIONAL_FLOW_TABLE_CANDIDATES = (
     {
         'table': 'institutional_trading_daily',
         'date': ['date', 'trade_date', 'data_date'],
@@ -771,238 +784,29 @@ def _select_optional_column(conn, table_name, column_candidates, alias, default_
 
 
 def _format_trade_date(value):
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        return value.strftime('%Y-%m-%d')
-    if hasattr(value, 'strftime'):
-        try:
-            return value.strftime('%Y-%m-%d')
-        except Exception:
-            pass
-    return str(value)[:10]
+    return _shared_format_trade_date(value)
 
 
 def _format_signed_number(value):
-    try:
-        if value is None:
-            return None
-        numeric = float(value)
-    except (TypeError, ValueError):
-        return 'N/A'
-
-    sign = '+' if numeric > 0 else ''
-    abs_value = abs(numeric)
-    if abs_value >= 1_000_000_000:
-        formatted = f'{numeric / 1_000_000_000:.2f}B'
-    elif abs_value >= 1_000_000:
-        formatted = f'{numeric / 1_000_000:.2f}M'
-    elif abs_value >= 1_000:
-        formatted = f'{numeric:,.0f}'
-    else:
-        formatted = f'{numeric:.0f}'
-    return f'{sign}{formatted}'
+    if value is None:
+        return None
+    return _shared_format_signed_number(value)
 
 
 def _format_compact_number(value, suffix=''):
-    try:
-        if value is None:
-            return None
-        numeric = float(value)
-    except (TypeError, ValueError):
-        return None
-
-    abs_value = abs(numeric)
-    if abs_value >= 1_000_000_000:
-        formatted = f'{numeric / 1_000_000_000:.2f}B'
-    elif abs_value >= 1_000_000:
-        formatted = f'{numeric / 1_000_000:.2f}M'
-    elif abs_value >= 1_000:
-        formatted = f'{numeric / 1_000:.2f}K'
-    else:
-        formatted = f'{numeric:.0f}'
-    return f'{formatted}{suffix}'
+    return _shared_format_compact_number(value, suffix)
 
 
 def _format_money_compact(value):
-    try:
-        if value is None:
-            return None
-        numeric = float(value)
-    except (TypeError, ValueError):
-        return None
-
-    abs_value = abs(numeric)
-    if abs_value >= 1_000_000_000:
-        return f'${numeric / 1_000_000_000:.2f}B'
-    if abs_value >= 1_000_000:
-        return f'${numeric / 1_000_000:.2f}M'
-    if abs_value >= 1_000:
-        return f'${numeric / 1_000:.2f}K'
-    return f'${numeric:.2f}'
+    return _shared_format_money_compact(value)
 
 
 def _derive_flow_value(row, net_key, buy_key, sell_key):
-    try:
-        net_value = float(row.get(net_key)) if net_key and row.get(net_key) is not None else None
-    except (TypeError, ValueError):
-        net_value = None
-    if net_value is not None:
-        return net_value
-
-    try:
-        buy_value = float(row.get(buy_key)) if buy_key and row.get(buy_key) is not None else None
-        sell_value = float(row.get(sell_key)) if sell_key and row.get(sell_key) is not None else None
-    except (TypeError, ValueError):
-        return None
-
-    if buy_value is not None and sell_value is not None:
-        return buy_value - sell_value
-    return None
+    return _shared_derive_flow_value(row, net_key, buy_key, sell_key)
 
 
 def _load_actual_institutional_flow_snapshot(conn, symbol: str) -> dict | None:
-    if _table_exists(conn, 'us_institutional_activity'):
-        row = conn.execute(text("""
-            SELECT snapshot_date,
-                   institution_report_date,
-                   mutualfund_report_date,
-                   institution_total_shares,
-                   institution_total_value,
-                   mutualfund_total_shares,
-                   mutualfund_total_value,
-                   insider_buys_6m,
-                   insider_sells_6m,
-                   insider_net_shares_6m
-            FROM us_institutional_activity
-            WHERE symbol = :sym
-            ORDER BY snapshot_date DESC, updated_at DESC, id DESC
-            LIMIT 1
-        """), {'sym': symbol}).mappings().first()
-
-        if row:
-            institution_parts = []
-            mutualfund_parts = []
-            insider_parts = []
-
-            institution_shares = _format_compact_number(row.get('institution_total_shares'), '股')
-            institution_value = _format_money_compact(row.get('institution_total_value'))
-            if institution_shares:
-                institution_parts.append(institution_shares)
-            if institution_value:
-                institution_parts.append(institution_value)
-
-            mutualfund_shares = _format_compact_number(row.get('mutualfund_total_shares'), '股')
-            mutualfund_value = _format_money_compact(row.get('mutualfund_total_value'))
-            if mutualfund_shares:
-                mutualfund_parts.append(mutualfund_shares)
-            if mutualfund_value:
-                mutualfund_parts.append(mutualfund_value)
-
-            insider_net = _format_signed_number(row.get('insider_net_shares_6m'))
-            insider_buys = _format_compact_number(row.get('insider_buys_6m'), '股')
-            insider_sells = _format_compact_number(row.get('insider_sells_6m'), '股')
-            if insider_net and insider_net != 'N/A':
-                insider_parts.append(f'{insider_net}股')
-            if insider_buys or insider_sells:
-                insider_parts.append(f'買 {insider_buys or "N/A"} / 賣 {insider_sells or "N/A"}')
-
-            rows = [
-                {'label': '機構持股', 'value': ' / '.join(institution_parts) or 'N/A'},
-                {'label': '共同基金', 'value': ' / '.join(mutualfund_parts) or 'N/A'},
-                {'label': '內部人近6M', 'value': ' | '.join(insider_parts) or 'N/A'},
-            ]
-            if any(item['value'] != 'N/A' for item in rows):
-                snapshot_date = _format_trade_date(row.get('snapshot_date'))
-                report_notes = []
-                institution_report = _format_trade_date(row.get('institution_report_date'))
-                mutualfund_report = _format_trade_date(row.get('mutualfund_report_date'))
-                if institution_report:
-                    report_notes.append(f'機構揭露 {institution_report}')
-                if mutualfund_report:
-                    report_notes.append(f'基金揭露 {mutualfund_report}')
-
-                note = '資料來源: Yahoo Finance institutional_holders / mutualfund_holders / insider_purchases'
-                if report_notes:
-                    note = f"{note}；{'，'.join(report_notes)}"
-
-                summary = ' / '.join(f"{item['label']} {item['value']}" for item in rows if item['value'] != 'N/A')
-                return {
-                    'trade_date': snapshot_date,
-                    'date_label': '快照日期',
-                    'headline_label': '法人 / 內部人快照',
-                    'rows': rows,
-                    'source': 'us_holder_activity',
-                    'summary': f'{snapshot_date} 主力快照: {summary}' if snapshot_date else f'主力快照: {summary}',
-                    'note': note,
-                    'is_fallback': False,
-                }
-
-    from sqlalchemy import text as sql_text
-
-    for candidate in INSTITUTIONAL_FLOW_TABLE_CANDIDATES:
-        table_name = candidate['table']
-        if not _table_exists(conn, table_name) or not _column_exists(conn, table_name, 'symbol'):
-            continue
-
-        date_column = _resolve_existing_column(conn, table_name, candidate['date'])
-        if not date_column:
-            continue
-
-        resolved_columns = {
-            'foreign_net': _resolve_existing_column(conn, table_name, candidate['foreign_net']),
-            'foreign_buy': _resolve_existing_column(conn, table_name, candidate['foreign_buy']),
-            'foreign_sell': _resolve_existing_column(conn, table_name, candidate['foreign_sell']),
-            'trust_net': _resolve_existing_column(conn, table_name, candidate['trust_net']),
-            'trust_buy': _resolve_existing_column(conn, table_name, candidate['trust_buy']),
-            'trust_sell': _resolve_existing_column(conn, table_name, candidate['trust_sell']),
-            'dealer_net': _resolve_existing_column(conn, table_name, candidate['dealer_net']),
-            'dealer_buy': _resolve_existing_column(conn, table_name, candidate['dealer_buy']),
-            'dealer_sell': _resolve_existing_column(conn, table_name, candidate['dealer_sell']),
-        }
-
-        if not any(resolved_columns.values()):
-            continue
-
-        select_columns = [f'{date_column} AS trade_date']
-        for alias, column_name in resolved_columns.items():
-            if column_name:
-                select_columns.append(f'{column_name} AS {alias}')
-
-        row = conn.execute(sql_text(f"""
-            SELECT {', '.join(select_columns)}
-            FROM {table_name}
-            WHERE symbol = :sym
-            ORDER BY {date_column} DESC
-            LIMIT 1
-        """), {'sym': symbol}).mappings().first()
-
-        if not row:
-            continue
-
-        foreign_value = _derive_flow_value(row, 'foreign_net', 'foreign_buy', 'foreign_sell')
-        trust_value = _derive_flow_value(row, 'trust_net', 'trust_buy', 'trust_sell')
-        dealer_value = _derive_flow_value(row, 'dealer_net', 'dealer_buy', 'dealer_sell')
-        if all(value is None for value in (foreign_value, trust_value, dealer_value)):
-            continue
-
-        trade_date = _format_trade_date(row.get('trade_date'))
-        rows = [
-            {'label': '外資', 'value': _format_signed_number(foreign_value)},
-            {'label': '投信', 'value': _format_signed_number(trust_value)},
-            {'label': '自營商', 'value': _format_signed_number(dealer_value)},
-        ]
-        summary = ' / '.join(f"{item['label']} {item['value']}" for item in rows)
-        return {
-            'trade_date': trade_date,
-            'rows': rows,
-            'source': 'actual',
-            'summary': f'{trade_date} 三大法人買賣超: {summary}' if trade_date else f'三大法人買賣超: {summary}',
-            'note': f'資料來源: {table_name} 原始買賣超欄位',
-            'is_fallback': False,
-        }
-
-    return None
+    return _shared_load_actual_institutional_flow_snapshot(conn, symbol)
 
 
 def _build_smart_money_trend(institutional_pass, money_flow_pass, insider_sentiment='NEUTRAL'):

@@ -41,3 +41,24 @@ def column_exists(conn, table_name: str, column_name: str) -> bool:
         LIMIT 1
     """), {'table_name': table_name, 'column_name': column_name}).first()
     return row is not None
+
+
+def resolve_existing_column(conn, table_name: str, column_candidates) -> Optional[str]:
+    """Return the first candidate column that exists for a table."""
+    for column_name in column_candidates:
+        if column_exists(conn, table_name, column_name):
+            return column_name
+    return None
+
+
+def optional_column_expr(conn, table_name: str, column_candidates, alias: str, default_sql: str = "NULL") -> str:
+    """Return a SQL select expression for the first existing candidate column."""
+    column_name = resolve_existing_column(conn, table_name, column_candidates)
+    if column_name:
+        return f"{column_name} AS {alias}"
+    return f"{default_sql} AS {alias}"
+
+
+def select_optional_column(conn, table_name: str, column_candidates, alias: str, default_sql: str = "NULL") -> str:
+    """Compatibility alias for optional select-column expressions."""
+    return optional_column_expr(conn, table_name, column_candidates, alias, default_sql=default_sql)

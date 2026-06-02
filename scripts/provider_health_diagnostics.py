@@ -33,7 +33,7 @@ REPAIR_WORKFLOW = [
 ]
 
 
-REPAIR_WORKFLOW = [
+LEGACY_REPAIR_WORKFLOW = [
     "檢查 OpenBB response/parser contract",
     "確認 yfinance fallback 是否可恢復覆蓋率",
     "確認 local market_data stale age",
